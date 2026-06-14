@@ -1,9 +1,13 @@
-// RunixOS task and process subsystem
+// RunixOS task and process subsystem — Phase 3
 pub mod capability;
 pub mod ipc;
+pub mod audit;
+pub mod snapshot;
+pub mod dist;
 
-pub use capability::{Capability, CapTable, Resource};
-pub use ipc::{Message, sys_send, sys_receive};
+pub use capability::{Capability, CapTable, Resource, RightsMask};
+pub use ipc::{IpcError, IpcTag, Message, MessageQueue, sys_send, sys_receive,
+              sys_send_typed, sys_receive_typed, sys_send_async, sys_receive_async};
 
 /// Unique identifier for each process/task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,10 +43,12 @@ pub struct Task {
     pub cr3: usize,
     pub cap_table: CapTable,
     pub ipc_buffer: Option<Message>,
+    pub msg_queue: MessageQueue,
+    pub fault_registers: Option<crate::interrupts::ExceptionFrame>,
 }
 
-pub const MAX_TASKS: usize = 8;
-pub const STACK_SIZE: usize = 8192; // 8 KiB stack
+pub const MAX_TASKS: usize = 132;
+pub const STACK_SIZE: usize = 32768; // 32 KiB stack
 
 // Statically allocate task stacks to avoid heap requirements in Phase 1
 #[no_mangle]
@@ -124,6 +130,8 @@ impl Task {
             cr3: crate::memory::current_pml4_paddr(),
             cap_table,
             ipc_buffer: None,
+            msg_queue: MessageQueue::new(),
+            fault_registers: None,
         }
     }
 
@@ -174,6 +182,8 @@ impl Task {
             cr3,
             cap_table,
             ipc_buffer: None,
+            msg_queue: MessageQueue::new(),
+            fault_registers: None,
         }
     }
 }

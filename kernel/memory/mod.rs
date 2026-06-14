@@ -289,3 +289,85 @@ unsafe fn get_or_create_table(table: *mut u64, idx: usize, hhdm: usize) -> Resul
         Ok((entry & 0x000ffffffffff000) as usize)
     }
 }
+
+/// The inclusive upper bound of canonical user-space lower half in x86_64.
+const USER_SPACE_UPPER_BOUND: usize = 0x0000_7FFF_FFFF_FFFFusize;
+
+/// Validates that the virtual address range `[ptr, ptr + len)` is mapped,
+/// user-accessible (U/S bit set at all levels), and writeable (if `writeable` is true).
+/// Returns `Ok(())` if fully valid, otherwise `Err(())`.
+pub fn validate_user_range(ptr: *const u8, len: usize, writeable: bool) -> Result<(), ()> {
+    if len == 0 {
+        return Ok(());
+    }
+
+    let start = ptr as usize;
+    let end = match start.checked_add(len) {
+        Some(e) => e,
+        None => return Err(()), // overflow
+    };
+
+    if end > USER_SPACE_UPPER_BOUND + 1 {
+        return Err(());
+    }
+
+    let hhdm = hhdm_offset();
+    let pml4_paddr = current_pml4_paddr();
+
+    let start_page = start & !0xfff;
+    let end_page = (end - 1) & !0xfff;
+
+    let mut vaddr = start_page;
+    loop {
+        let pml4 = (pml4_paddr + hhdm) as *const u64;
+        let pml4_idx = (vaddr >> 39) & 0x1ff;
+        let pml4_entry = unsafe { *pml4.add(pml4_idx) };
+        if (pml4_entry & 0x1) == 0 || (pml4_entry & 0x4) == 0 {
+            return Err(());
+        }
+        if writeable && (pml4_entry & 0x2) == 0 {
+            return Err(());
+        }
+
+        let pdpt_paddr = (pml4_entry & 0x000ffffffffff000) as usize;
+        let pdpt = (pdpt_paddr + hhdm) as *const u64;
+        let pdpt_idx = (vaddr >> 30) & 0x1ff;
+        let pdpt_entry = unsafe { *pdpt.add(pdpt_idx) };
+        if (pdpt_entry & 0x1) == 0 || (pdpt_entry & 0x4) == 0 {
+            return Err(());
+        }
+        if writeable && (pdpt_entry & 0x2) == 0 {
+            return Err(());
+        }
+
+        let pd_paddr = (pdpt_entry & 0x000ffffffffff000) as usize;
+        let pd = (pd_paddr + hhdm) as *const u64;
+        let pd_idx = (vaddr >> 21) & 0x1ff;
+        let pd_entry = unsafe { *pd.add(pd_idx) };
+        if (pd_entry & 0x1) == 0 || (pd_entry & 0x4) == 0 {
+            return Err(());
+        }
+        if writeable && (pd_entry & 0x2) == 0 {
+            return Err(());
+        }
+
+        let pt_paddr = (pd_entry & 0x000ffffffffff000) as usize;
+        let pt = (pt_paddr + hhdm) as *const u64;
+        let pt_idx = (vaddr >> 12) & 0x1ff;
+        let pt_entry = unsafe { *pt.add(pt_idx) };
+        if (pt_entry & 0x1) == 0 || (pt_entry & 0x4) == 0 {
+            return Err(());
+        }
+        if writeable && (pt_entry & 0x2) == 0 {
+            return Err(());
+        }
+
+        if vaddr == end_page {
+            break;
+        }
+        vaddr += 4096;
+    }
+
+    Ok(())
+}
+

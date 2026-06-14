@@ -48,9 +48,13 @@ impl Tss {
 
 static mut TSS: Tss = Tss::new();
 
+pub fn get_tss_address() -> *const () {
+    unsafe { &raw const TSS as *const () }
+}
+
 // GDT: null, kcode, kdata, ucode, udata, tss(low), tss(high).
 const GDT_LEN: usize = 7;
-static mut GDT: [u64; GDT_LEN] = [0; GDT_LEN];
+pub static mut GDT: [u64; GDT_LEN] = [0; GDT_LEN];
 
 /// Dedicated kernel stack used as the initial TSS.rsp0 (privilege-transition
 /// stack). Per-task kernel stacks override this via `set_kernel_stack`.

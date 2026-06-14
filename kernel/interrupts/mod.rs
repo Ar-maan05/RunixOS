@@ -98,15 +98,119 @@ fn set_handler_dpl(vector: usize, handler_addr: u64, selector: u16, dpl: u8) {
     }
 }
 
+/// The full register frame saved by the exception assembly stubs.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ExceptionFrame {
+    // General-purpose registers (pushed by exception_common)
+    pub rax: u64,
+    pub rbx: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub rbp: u64,
+    pub r8:  u64,
+    pub r9:  u64,
+    pub r10: u64,
+    pub r11: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+    // Pushed by entry stubs
+    pub vector: u64,
+    pub error_code: u64,
+    // Pushed by CPU hardware on interrupt/exception
+    pub rip: u64,
+    pub cs: u64,
+    pub rflags: u64,
+    pub rsp: u64,
+    pub ss: u64,
+}
+
+// ── Exception Entry Stubs ───────────────────────────────────────────────────
+
+core::arch::global_asm!(
+    ".global divide_error_entry",
+    "divide_error_entry:",
+    "    push 0",                  // dummy error code
+    "    push 0",                  // vector 0
+    "    jmp exception_common",
+
+    ".global invalid_opcode_entry",
+    "invalid_opcode_entry:",
+    "    push 0",                  // dummy error code
+    "    push 6",                  // vector 6
+    "    jmp exception_common",
+
+    ".global general_protection_entry",
+    "general_protection_entry:",
+    "    // error code already pushed by CPU",
+    "    push 13",                 // vector 13
+    "    jmp exception_common",
+
+    ".global page_fault_entry",
+    "page_fault_entry:",
+    "    // error code already pushed by CPU",
+    "    push 14",                 // vector 14
+    "    jmp exception_common",
+
+    "exception_common:",
+    "    push r15",
+    "    push r14",
+    "    push r13",
+    "    push r12",
+    "    push r11",
+    "    push r10",
+    "    push r9",
+    "    push r8",
+    "    push rbp",
+    "    push rdi",
+    "    push rsi",
+    "    push rdx",
+    "    push rcx",
+    "    push rbx",
+    "    push rax",
+    "    mov rdi, rsp",            // &ExceptionFrame
+    "    mov rsi, [rsp + 15*8]",   // vector number
+    "    call exception_dispatch",
+    "    // In case the handler returns (e.g. for non-terminating faults):",
+    "    pop rax",
+    "    pop rbx",
+    "    pop rcx",
+    "    pop rdx",
+    "    pop rsi",
+    "    pop rdi",
+    "    pop rbp",
+    "    pop r8",
+    "    pop r9",
+    "    pop r10",
+    "    pop r11",
+    "    pop r12",
+    "    pop r13",
+    "    pop r14",
+    "    pop r15",
+    "    add rsp, 16",             // clean vector and error code
+    "    iretq",
+);
+
+extern "C" {
+    pub fn divide_error_entry();
+    pub fn invalid_opcode_entry();
+    pub fn general_protection_entry();
+    pub fn page_fault_entry();
+}
+
 /// Installs the IDT and points the CPU at it.
 pub fn init_idt() {
     let cs = current_cs();
 
-    set_handler(0, divide_error_handler as *const () as u64, cs);
-    set_handler(6, invalid_opcode_handler as *const () as u64, cs);
+    set_handler(0, divide_error_entry as *const () as u64, cs);
+    set_handler(6, invalid_opcode_entry as *const () as u64, cs);
     set_handler(8, double_fault_handler as *const () as u64, cs);
-    set_handler(13, general_protection_handler as *const () as u64, cs);
-    set_handler(14, page_fault_handler as *const () as u64, cs);
+    set_handler(13, general_protection_entry as *const () as u64, cs);
+    set_handler(14, page_fault_entry as *const () as u64, cs);
 
     // Syscall trap: reachable from ring 3 (DPL=3).
     set_handler_dpl(0x80, crate::syscall::syscall_entry as *const () as u64, cs, 3);
@@ -125,17 +229,77 @@ pub fn init_idt() {
     println!("IDT installed: CPU exceptions are now caught.");
 }
 
-/// Shared logic: report a recoverable fault and either terminate the offending
-/// task (and reschedule) or, if no task context exists, halt.
-fn contain_fault(name: &str, rip: u64) -> ! {
+/// Shared logic: log a fault with full register diagnostics, save context,
+/// and terminate only the offending task (or halt if no task context).
+#[no_mangle]
+pub extern "C" fn exception_dispatch(frame: &ExceptionFrame, vector: u64) -> ! {
+    let name = match vector {
+        0  => "divide error (#DE)",
+        6  => "invalid opcode (#UD)",
+        13 => "general protection fault (#GP)",
+        14 => "page fault (#PF)",
+        _  => "unknown CPU exception",
+    };
+
+    let cr2 = if vector == 14 {
+        let val: u64;
+        unsafe {
+            // SAFETY: reading CR2 (faulting address) has no side effects.
+            core::arch::asm!("mov {}, cr2", out(reg) val, options(nomem, nostack, preserves_flags));
+        }
+        Some(val)
+    } else {
+        None
+    };
+
     if let Some(id) = scheduler::current_task_id() {
+        // Save the full register context into the task structure
+        {
+            let mut sched = scheduler::SCHEDULER.lock();
+            if let Some(task) = sched.get_task_mut(id) {
+                task.fault_registers = Some(*frame);
+            }
+        }
+
         println!(
             "[FAULT] {} in task {} at rip={:#x} -> terminating task, kernel continues.",
-            name, id.0, rip
+            name, id.0, frame.rip
         );
+        if let Some(addr) = cr2 {
+            println!("  Faulting address: {:#x}", addr);
+        }
+        println!("  Error code: {:#x}", frame.error_code);
+        println!("  Registers:");
+        println!(
+            "    RAX={:#018x} RBX={:#018x} RCX={:#018x} RDX={:#018x}",
+            frame.rax, frame.rbx, frame.rcx, frame.rdx
+        );
+        println!(
+            "    RSI={:#018x} RDI={:#018x} RBP={:#018x} RSP={:#018x}",
+            frame.rsi, frame.rdi, frame.rbp, frame.rsp
+        );
+        println!(
+            "    R8 ={:#018x} R9 ={:#018x} R10={:#018x} R11={:#018x}",
+            frame.r8, frame.r9, frame.r10, frame.r11
+        );
+        println!(
+            "    R12={:#018x} R13={:#018x} R14={:#018x} R15={:#018x}",
+            frame.r12, frame.r13, frame.r14, frame.r15
+        );
+        println!(
+            "    CS ={:#06x} SS ={:#06x} RFLAGS={:#018x}",
+            frame.cs, frame.ss, frame.rflags
+        );
+
         scheduler::terminate_current_task();
     } else {
-        println!("[FAULT] {} at rip={:#x} with no task context -> halting.", name, rip);
+        println!(
+            "[FAULT] {} at rip={:#x} with no task context -> halting.",
+            name, frame.rip
+        );
+        if let Some(addr) = cr2 {
+            println!("  Faulting address: {:#x}", addr);
+        }
         halt_forever();
     }
 }
@@ -149,30 +313,8 @@ fn halt_forever() -> ! {
     }
 }
 
-extern "x86-interrupt" fn divide_error_handler(frame: InterruptStackFrame) {
-    contain_fault("divide error (#DE)", frame.instruction_pointer);
-}
-
-extern "x86-interrupt" fn invalid_opcode_handler(frame: InterruptStackFrame) {
-    contain_fault("invalid opcode (#UD)", frame.instruction_pointer);
-}
-
-extern "x86-interrupt" fn general_protection_handler(frame: InterruptStackFrame, error_code: u64) {
-    println!("[FAULT] #GP error_code={:#x}", error_code);
-    contain_fault("general protection fault (#GP)", frame.instruction_pointer);
-}
-
-extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, error_code: u64) {
-    let cr2: u64;
-    unsafe {
-        // SAFETY: reading CR2 (faulting address) has no side effects.
-        core::arch::asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack, preserves_flags));
-    }
-    println!("[FAULT] #PF faulting_addr={:#x} error_code={:#x}", cr2, error_code);
-    contain_fault("page fault (#PF)", frame.instruction_pointer);
-}
-
 extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, _error_code: u64) -> ! {
     println!("[FATAL] double fault (#DF) at rip={:#x} -> halting.", frame.instruction_pointer);
     halt_forever();
 }
+

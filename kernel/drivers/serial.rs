@@ -188,3 +188,23 @@ macro_rules! println {
     () => ($crate::print!("\n"));
     ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
 }
+
+/// Compile-time verbosity switch for low-level kernel tracing.
+///
+/// When `false`, `dbg_println!` expands to nothing, keeping the boot log
+/// deterministic and readable (Phase 9: deterministic boot). Flip to `true`
+/// to recover the verbose per-syscall / per-spawn diagnostics used during
+/// bring-up.
+pub const DEBUG: bool = false;
+
+/// Like `println!`, but only emits when [`DEBUG`] is `true`. Used for
+/// high-frequency diagnostics (syscall entry/exit, GDT dumps, task wiring)
+/// that would otherwise flood the serial console.
+#[macro_export]
+macro_rules! dbg_println {
+    ($($arg:tt)*) => {
+        if $crate::drivers::serial::DEBUG {
+            $crate::println!($($arg)*);
+        }
+    };
+}

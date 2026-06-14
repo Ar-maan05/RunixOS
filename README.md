@@ -1,152 +1,209 @@
 # RunixOS
 
-A capability-based **microkernel** research OS written in Rust, targeting `x86_64`.
+> A capability-based microkernel research operating system written in Rust.
+
+[![Rust](https://img.shields.io/badge/Rust-nightly-orange)](#)
+[![Architecture](https://img.shields.io/badge/Architecture-x86__64-blue)](#)
+[![Boot](https://img.shields.io/badge/Boot-UEFI%20%2B%20Limine-green)](#)
+[![Status](https://img.shields.io/badge/Status-Phases%200--9%20Complete-success)](#)
+[![License](https://img.shields.io/badge/License-MIT-yellow)](#)
+
+RunixOS is an experimental operating system that explores what modern systems software might look like if capabilities, message passing, and persistence were treated as first-class principles from the beginning.
+
+The project investigates:
+
+* Minimal kernels and rich user-space services
+* Capability-based security
+* IPC-first system design
+* User-space drivers and services
+* Transparent service distribution
+* Persistent system state
+* Service migration and recovery
+
+RunixOS is not intended to be a Linux replacement or a POSIX-compatible operating system. It is a clean-slate systems research platform focused on isolation, modularity, and recoverability.
 
 > [!NOTE]
-> RunixOS is a research and educational project. It is not intended for production use.
-> The focus is on exploring a minimal, IPC-first kernel where security is enforced by
-> unforgeable capabilities and all services live in user space.
+> RunixOS is a research and educational project and is not intended for production use.
 
 ---
 
-## Core Identity (non-negotiable)
+## Architecture at a Glance
 
-RunixOS is a **capability-based microkernel**. It is:
+```text
++----------------------------------------------------------------+
+|                           User Space                           |
+|----------------------------------------------------------------|
+| Init | Drivers | Filesystem | Logger | Services | Supervisor   |
++----------------------------------------------------------------+
+                       ↑                     ↓
+                 IPC + Capabilities + Persistence
+                       ↓                     ↑
++----------------------------------------------------------------+
+|                             Kernel                             |
+|----------------------------------------------------------------|
+| Scheduler | Memory | IPC | Capability Enforcement | Checkpoint |
++----------------------------------------------------------------+
+                       ↑                     ↓
+                Hardware / Firmware / Devices
+```
 
-- **IPC-first** — message passing is the only communication mechanism
-- **Capability-gated** — no ambient authority; every kernel API requires a valid capability
-- **User-space service driven** — drivers, filesystem, logging, and init run as processes
-- **Minimal by design** — the kernel implements only core primitives
+---
 
-It is explicitly **not** Unix-like, **not** POSIX-compatible, **not** monolithic, and has
-**no** traditional syscall model (no `fork`/`exec` semantics). There is no shared memory
-between processes and no global registries or hidden state.
+## Core Principles
+
+* Minimal kernel, rich user space
+* Capabilities are the sole security primitive
+* IPC is the sole communication primitive
+* No ambient authority
+* Isolation by default
+* Distribution should be transparent
+* Persistence should be a first-class system property
+* Correctness over performance
+* Simplicity over feature count
+
+---
+
+## Core Identity
+
+RunixOS is a capability-based microkernel.
+
+It is:
+
+* IPC-first
+* Capability-gated
+* User-space service driven
+* Minimal by design
+
+It is explicitly:
+
+* Not Unix-like
+* Not POSIX-compatible
+* Not monolithic
+* Not syscall-centric
+
+There is:
+
+* No shared memory between processes
+* No global registries
+* No ambient authority
 
 The kernel implements only:
 
-- physical memory manager
-- virtual memory manager
-- round-robin scheduler
-- IPC (message passing)
-- capability system
+* Physical memory management
+* Virtual memory management
+* Scheduling
+* IPC routing
+* Capability enforcement
+* Checkpoint and persistence primitives
 
-No filesystem, no drivers, no OS abstractions live in the kernel.
-
----
-
-## Roadmap & Progress
-
-The architecture is developed in phases (see [`../OS_PLAN.md`](../OS_PLAN.md) for the full
-directive). Milestone 0 (boot, serial, higher-half mapping, build/disk pipeline) is complete.
-
-- [x] **Milestone 0: Boot & Toolchain** — UEFI boot via Limine, COM1 serial, higher-half
-      mapping, build/disk pipeline, CI
-- [x] **Phase 1: Microkernel Core** — minimal kernel primitives
-  - [x] Physical page frame allocator
-  - [x] Virtual memory (4-level page-table mapper)
-  - [x] Cooperative round-robin scheduler + context switch
-  - [x] Capability system (per-process capability table, resource binding)
-  - [x] Rendezvous (blocking) IPC: `send` / `receive`
-  - [x] Capability-gated kernel service (serial write)
-  - [x] Fault isolation — IDT catches CPU exceptions; a faulting task is
-        terminated and the kernel keeps scheduling the rest
-- [x] **Phase 2: Userspace Shift** — user-mode execution & IPC-based syscalls
-  - [x] GDT + TSS with ring-3 segments and a per-task kernel (rsp0) stack
-  - [x] Ring-3 execution (iretq into user mode)
-  - [x] Per-process address spaces (own PML4 + CR3 switch on context switch)
-  - [x] IPC-based syscall transport (`int 0x80`): `send` / `receive` /
-        `serial_write` / `yield`, no traditional syscall model
-  - [x] A ring-3 logging **service** runs entirely in user space: it receives
-        IPC and prints via a capability-gated serial syscall
-  - [x] Both a kernel task and a ring-3 user task send capability-gated IPC
-        (from their own memory) to that user-space service
-- [ ] **Phase 3: System Coherence** — capability sealing/scoping/inheritance, structured
-      IPC, kernel dispatch layer
-- [ ] **Phase 4: Isolation & Safety Hardening** — strict memory isolation, fault containment
-- [ ] **Phase 5: Async IPC & System Scaling** — typed/versioned messages, non-blocking IPC,
-      identical behavior at 3 and 300 processes
-- [ ] **Phase 6: Userspace Ecosystem** — init system, capability distribution, service
-      lifecycle; all services in user space
-
-### Phase 1 status
-
-The current build boots in QEMU and runs two kernel tasks:
-
-- **Task 1 (sender)** generates a data packet and sends it over an IPC capability.
-- **Task 2 (logging service)** receives the message and prints it using its serial capability.
-
-Capability gating is demonstrated: Task 1's attempt to write to the serial console through a
-capability slot it does not own is rejected by the kernel.
+Everything else lives in user space.
 
 ---
 
-## Repository Structure
+## Project Status
 
-```
-kernel/
-├── arch/x86_64/    # CPU-specific setup (GDT, IDT, paging) — stubs for now
-├── boot/           # Kernel entry point (main.rs) and Limine protocol requests
-├── docs/           # Architecture design documentation
-├── drivers/        # Boot-essential drivers only (COM1 serial for early logging)
-├── fs/             # Reserved: filesystem is a user-space service (Phase 2+)
-├── interrupts/     # Reserved: exception/fault handling (Phase 1 fault isolation)
-├── memory/         # Physical frame allocator + virtual memory mapper
-├── process/        # Task abstraction, capability table, IPC
-│   ├── capability.rs   # Capability + CapTable (per-process)
-│   └── ipc.rs          # Rendezvous message passing
-├── scheduler/      # Cooperative round-robin scheduler + context switch
-├── syscall/        # Capability-gated kernel entry points (transitional)
-├── tests/          # Kernel integration tests
-└── userspace/      # Reserved: user-mode transition & ELF loading (Phase 2+)
-```
+### Completed
 
-> The `fs/`, `userspace/`, and `interrupts/` directories are intentionally empty stubs:
-> per the directive, the kernel must **not** grow these subsystems. Filesystem, drivers,
-> logging, and init are destined for user space (Phase 2+).
+* ✅ Phase 0: Boot infrastructure
+* ✅ Phase 1: Microkernel core
+* ✅ Phase 2: Userspace shift
+* ✅ Phase 3: System coherence
+* ✅ Phase 4: Isolation and safety hardening
+* ✅ Phase 5: Async IPC and scaling
+* ✅ Phase 6: Userspace ecosystem
+* ✅ Phase 7: Stress, scale, and failure testing
+* ✅ Phase 8: Security and capability maturity
+* ✅ Phase 9: Stability and self-sufficiency
+
+### Experimental
+
+* ⚠️ Phase 10: Distributed persistence and service migration
 
 ---
 
-## Prerequisites
+## Research Questions
 
-- **Rust** (nightly toolchain, selected automatically by `rust-toolchain.toml`)
-- **QEMU** (`qemu-system-x86_64`)
-- **mtools** (`mcopy`, `mformat`)
-- **dosfstools** (`mkfs.vfat`)
-- **parted**, and OVMF firmware (`/usr/share/OVMF/OVMF_CODE.fd`)
+RunixOS aims to answer the following questions:
+
+1. Can capabilities replace traditional access control mechanisms?
+2. Can an IPC-first operating system remain practical at scale?
+3. Can user-space services provide sufficient reliability?
+4. Can distribution be made transparent to applications?
+5. Can operating system state become a persistent object?
+6. Can services survive failures through checkpointing and restoration?
+7. Can a capability-based operating system scale from a single machine to a distributed system without changing its programming model?
 
 ---
 
-## How to Build and Run
+## Build and Run
 
-### 1. Build the disk image
+### Requirements
+
+* Rust nightly
+* QEMU (`qemu-system-x86_64`)
+* `mtools`
+* `dosfstools`
+* `parted`
+* OVMF firmware
+
+### Build
 
 ```bash
 ./build_disk.sh
 ```
 
-### 2. Launch in QEMU
+### Run
 
 ```bash
 ./run.sh
 ```
 
-COM1 serial output is redirected to your host console. On boot you should see:
+### Headless Verification
 
-```
-RunixOS kernel initialized.
-Memory Map Entries:
-  ...
-Frame Allocator initialized. Usable start: 0x..., end: 0x...
-Microkernel tasks loaded. Launching scheduler...
-[Task 2 Logging Service] Received IPC from Task 1: Sensor data: Temp=24.5C
+```bash
+timeout 12 qemu-system-x86_64 -M q35 \
+  -drive if=pflash,unit=0,format=raw,file=/usr/share/OVMF/OVMF_CODE.fd,readonly=on \
+  -drive file=disk.img,format=raw,media=disk \
+  -serial stdio -m 2G -display none -no-reboot > serial.log 2>&1
 ```
 
-> **Bootloader note:** the bundled bootloader is Limine 7.13.3, which supports Limine base
-> revision 2. The kernel pins `BaseRevision::with_revision(2)` accordingly. If you upgrade
-> the bootloader in `limine-bin/`, you may raise the requested base revision to match.
+The graphical display is intentionally blank. All diagnostics are emitted through the serial console.
+
+---
+
+## Repository Structure
+
+```text
+kernel/
+├── arch/x86_64/
+├── boot/
+├── docs/
+├── drivers/
+├── fs/
+├── interrupts/
+├── memory/
+├── process/
+├── scheduler/
+├── syscall/
+├── tests/
+└── userspace/
+```
+
+The complete phase-by-phase design directive is available in `OS_PLAN.md`.
+
+The detailed implementation reference is available in `kernel/docs/architecture.md`.
+
+---
+
+## Final Research Thesis
+
+RunixOS demonstrates that:
+
+> A capability-based, IPC-driven distributed operating system can support persistence, migration, and fault tolerance while maintaining a minimal kernel, strict isolation, and a uniform programming model.
 
 ---
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+MIT
+

@@ -4,15 +4,16 @@ use crate::drivers::serial::Spinlock;
 
 /// The central scheduler tracking tasks and the currently running task.
 pub struct Scheduler {
-    pub tasks: [Option<Task>; 8],
+    pub tasks: [Option<Task>; crate::process::MAX_TASKS],
     pub current_task_id: Option<TaskId>,
 }
 
 impl Scheduler {
     /// Safe helper to query a reference to a task by ID.
     pub fn get_task(&self, id: TaskId) -> Option<&Task> {
-        for slot in self.tasks.iter() {
-            if let Some(ref t) = slot {
+        let idx = id.0;
+        if idx < self.tasks.len() {
+            if let Some(ref t) = self.tasks[idx] {
                 if t.id == id {
                     return Some(t);
                 }
@@ -23,8 +24,9 @@ impl Scheduler {
 
     /// Safe helper to query a mutable reference to a task by ID.
     pub fn get_task_mut(&mut self, id: TaskId) -> Option<&mut Task> {
-        for slot in self.tasks.iter_mut() {
-            if let Some(ref mut t) = slot {
+        let idx = id.0;
+        if idx < self.tasks.len() {
+            if let Some(ref mut t) = self.tasks[idx] {
                 if t.id == id {
                     return Some(t);
                 }
@@ -36,7 +38,7 @@ impl Scheduler {
 
 /// Global scheduler protected by a spinlock.
 pub static SCHEDULER: Spinlock<Scheduler> = Spinlock::new(Scheduler {
-    tasks: [None, None, None, None, None, None, None, None],
+    tasks: [const { None }; crate::process::MAX_TASKS],
     current_task_id: None,
 });
 
@@ -47,9 +49,14 @@ pub fn current_task_id() -> Option<TaskId> {
 
 /// Terminates the currently running task and switches to the next ready task.
 ///
-/// Called from a fault handler to contain a buggy task: the faulting task's
-/// context is abandoned (its stack is never resumed), and the kernel proceeds
-/// with the remaining tasks. Never returns to the caller.
+/// Two callers:
+///   - the fault handler, to *contain* a buggy task (its context is abandoned
+///     and the kernel proceeds with the remaining tasks); and
+///   - a kernel task that has finished its work and wants to exit cleanly.
+///
+/// Either way the dying task's stack is never resumed, any task blocked sending
+/// to it is woken (and will observe `TargetGone`), and control passes to the
+/// next ready task. Never returns to the caller.
 pub fn terminate_current_task() -> ! {
     let mut new_rsp_val: usize = 0;
     let mut new_kstack_top: usize = 0;
@@ -60,14 +67,25 @@ pub fn terminate_current_task() -> ! {
         let max_tasks = crate::process::MAX_TASKS;
 
         // Mark the current task terminated.
-        let curr_idx = sched.current_task_id.and_then(|curr_id| {
-            (0..max_tasks).find(|&i| {
-                sched.tasks[i].as_ref().map_or(false, |t| t.id == curr_id)
-            })
-        });
+        let curr_idx = sched.current_task_id.map(|curr_id| curr_id.0);
         if let Some(idx) = curr_idx {
-            if let Some(t) = sched.tasks[idx].as_mut() {
-                t.state = TaskState::Terminated;
+            if idx < max_tasks {
+                if let Some(t) = sched.tasks[idx].as_mut() {
+                    t.state = TaskState::Terminated;
+                }
+            }
+        }
+
+        // Failure containment: wake any task blocked sending to the dying task.
+        // On resume each sees the target Terminated and gets `TargetGone`
+        // instead of blocking forever on a channel that can never complete.
+        if let Some(dead) = sched.current_task_id {
+            for slot in sched.tasks.iter_mut() {
+                if let Some(t) = slot.as_mut() {
+                    if t.state == TaskState::BlockedOnSend(dead) {
+                        t.state = TaskState::Ready;
+                    }
+                }
             }
         }
 
@@ -130,13 +148,9 @@ pub fn yield_cpu() {
 
         // Find the index of the currently executing task
         if let Some(curr_id) = sched.current_task_id {
-            for i in 0..max_tasks {
-                if let Some(ref t) = sched.tasks[i] {
-                    if t.id == curr_id {
-                        current_idx = Some(i);
-                        break;
-                    }
-                }
+            let idx = curr_id.0;
+            if idx < max_tasks && sched.tasks[idx].is_some() {
+                current_idx = Some(idx);
             }
         }
 
