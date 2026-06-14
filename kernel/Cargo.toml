@@ -1,0 +1,12 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Limine bootloader protocol bindings
+limine = "0.6.0"
+
+[[bin]]
+name = "runixos"
+path = "boot/main.rs"

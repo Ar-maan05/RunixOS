@@ -1,0 +1,213 @@
+// RunixOS microkernel scheduler
+use crate::process::{Task, TaskId, TaskState, switch_context};
+use crate::drivers::serial::Spinlock;
+
+/// The central scheduler tracking tasks and the currently running task.
+pub struct Scheduler {
+    pub tasks: [Option<Task>; 8],
+    pub current_task_id: Option<TaskId>,
+}
+
+impl Scheduler {
+    /// Safe helper to query a reference to a task by ID.
+    pub fn get_task(&self, id: TaskId) -> Option<&Task> {
+        for slot in self.tasks.iter() {
+            if let Some(ref t) = slot {
+                if t.id == id {
+                    return Some(t);
+                }
+            }
+        }
+        None
+    }
+
+    /// Safe helper to query a mutable reference to a task by ID.
+    pub fn get_task_mut(&mut self, id: TaskId) -> Option<&mut Task> {
+        for slot in self.tasks.iter_mut() {
+            if let Some(ref mut t) = slot {
+                if t.id == id {
+                    return Some(t);
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Global scheduler protected by a spinlock.
+pub static SCHEDULER: Spinlock<Scheduler> = Spinlock::new(Scheduler {
+    tasks: [None, None, None, None, None, None, None, None],
+    current_task_id: None,
+});
+
+/// Returns the ID of the currently running task, if any.
+pub fn current_task_id() -> Option<TaskId> {
+    SCHEDULER.lock().current_task_id
+}
+
+/// Terminates the currently running task and switches to the next ready task.
+///
+/// Called from a fault handler to contain a buggy task: the faulting task's
+/// context is abandoned (its stack is never resumed), and the kernel proceeds
+/// with the remaining tasks. Never returns to the caller.
+pub fn terminate_current_task() -> ! {
+    let mut new_rsp_val: usize = 0;
+    let mut new_kstack_top: usize = 0;
+    let mut new_cr3: usize = 0;
+
+    {
+        let mut sched = SCHEDULER.lock();
+        let max_tasks = crate::process::MAX_TASKS;
+
+        // Mark the current task terminated.
+        let curr_idx = sched.current_task_id.and_then(|curr_id| {
+            (0..max_tasks).find(|&i| {
+                sched.tasks[i].as_ref().map_or(false, |t| t.id == curr_id)
+            })
+        });
+        if let Some(idx) = curr_idx {
+            if let Some(t) = sched.tasks[idx].as_mut() {
+                t.state = TaskState::Terminated;
+            }
+        }
+
+        // Pick the next ready task (round-robin from after the current one).
+        let start = curr_idx.map(|i| (i + 1) % max_tasks).unwrap_or(0);
+        for offset in 0..max_tasks {
+            let idx = (start + offset) % max_tasks;
+            if let Some(t) = sched.tasks[idx].as_mut() {
+                if t.state == TaskState::Ready {
+                    t.state = TaskState::Running;
+                    new_rsp_val = t.rsp;
+                    new_kstack_top = t.kstack_top;
+                    new_cr3 = t.cr3;
+                    sched.current_task_id = Some(t.id);
+                    break;
+                }
+            }
+        }
+    }
+
+    if new_rsp_val != 0 {
+        if new_kstack_top != 0 {
+            crate::arch::gdt::set_kernel_stack(new_kstack_top as u64);
+        }
+        if new_cr3 != 0 {
+            crate::memory::switch_address_space(new_cr3);
+        }
+        // Discard the dying task's context: save area is a throwaway local.
+        let mut dummy: usize = 0;
+        unsafe {
+            // SAFETY: `new_rsp_val` is a ready task's saved stack pointer built
+            // by `Task::new` (or previously saved by `switch_context`). We never
+            // return to `dummy`, so abandoning it is sound.
+            switch_context(&mut dummy as *mut usize, new_rsp_val as *const usize);
+        }
+    }
+
+    // No other task to run: nothing left to schedule, halt.
+    loop {
+        unsafe {
+            core::arch::asm!("hlt");
+        }
+    }
+}
+
+/// Yields the CPU to the next scheduled task.
+/// Implements cooperative context switching.
+pub fn yield_cpu() {
+    let mut current_idx = None;
+    let mut next_idx = None;
+
+    let mut old_rsp_ptr: *mut usize = core::ptr::null_mut();
+    let mut new_rsp_val: usize = 0;
+    let mut new_kstack_top: usize = 0;
+    let mut new_cr3: usize = 0;
+
+    {
+        let mut sched = SCHEDULER.lock();
+        let max_tasks = crate::process::MAX_TASKS;
+
+        // Find the index of the currently executing task
+        if let Some(curr_id) = sched.current_task_id {
+            for i in 0..max_tasks {
+                if let Some(ref t) = sched.tasks[i] {
+                    if t.id == curr_id {
+                        current_idx = Some(i);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Perform cooperative round-robin search starting after current task
+        if let Some(curr_idx) = current_idx {
+            let start = (curr_idx + 1) % max_tasks;
+            for offset in 0..max_tasks {
+                let idx = (start + offset) % max_tasks;
+                if let Some(ref t) = sched.tasks[idx] {
+                    if t.state == TaskState::Ready {
+                        next_idx = Some(idx);
+                        break;
+                    }
+                }
+            }
+        } else {
+            // No active task running yet, schedule the first ready task
+            for i in 0..max_tasks {
+                if let Some(ref t) = sched.tasks[i] {
+                    if t.state == TaskState::Ready {
+                        next_idx = Some(i);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if let Some(next) = next_idx {
+            if let Some(curr) = current_idx {
+                if curr != next {
+                    // Update state of currently active task (if it wasn't blocked/terminated)
+                    if sched.tasks[curr].as_ref().unwrap().state == TaskState::Running {
+                        sched.tasks[curr].as_mut().unwrap().state = TaskState::Ready;
+                    }
+                    // Start running the next task
+                    sched.tasks[next].as_mut().unwrap().state = TaskState::Running;
+
+                    old_rsp_ptr = &mut sched.tasks[curr].as_mut().unwrap().rsp as *mut usize;
+                    new_rsp_val = sched.tasks[next].as_ref().unwrap().rsp;
+                    new_kstack_top = sched.tasks[next].as_ref().unwrap().kstack_top;
+                    new_cr3 = sched.tasks[next].as_ref().unwrap().cr3;
+                    sched.current_task_id = Some(sched.tasks[next].as_ref().unwrap().id);
+                }
+            } else {
+                // First-time scheduler boot: start running the target task
+                sched.tasks[next].as_mut().unwrap().state = TaskState::Running;
+                new_rsp_val = sched.tasks[next].as_ref().unwrap().rsp;
+                new_kstack_top = sched.tasks[next].as_ref().unwrap().kstack_top;
+                new_cr3 = sched.tasks[next].as_ref().unwrap().cr3;
+                sched.current_task_id = Some(sched.tasks[next].as_ref().unwrap().id);
+
+                // Use static dummy area to write the initial boot context's stack pointer
+                static mut BOOT_RSP: usize = 0;
+                old_rsp_ptr = unsafe { &mut BOOT_RSP as *mut usize };
+            }
+        }
+    }
+
+    // Perform context switch if we found a valid next task and stack pointer
+    if !old_rsp_ptr.is_null() && new_rsp_val != 0 {
+        // Point the TSS at the incoming task's kernel stack so its next ring-3
+        // -> ring-0 transition lands on the right stack.
+        if new_kstack_top != 0 {
+            crate::arch::gdt::set_kernel_stack(new_kstack_top as u64);
+        }
+        // Activate the incoming task's address space (no-op if unchanged).
+        if new_cr3 != 0 {
+            crate::memory::switch_address_space(new_cr3);
+        }
+        unsafe {
+            switch_context(old_rsp_ptr, new_rsp_val as *const usize);
+        }
+    }
+}

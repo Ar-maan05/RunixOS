@@ -1,0 +1,11 @@
+/target/
+/disk.img
+/esp/
+/limine-bin/
+.DS_Store
+
+# generated / runtime artifacts
+screenshot.ppm
+qemu.log
+*.sock
+esp.img
