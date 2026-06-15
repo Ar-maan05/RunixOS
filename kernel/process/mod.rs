@@ -1,4 +1,4 @@
-// RunixOS task and process subsystem — Phase 3
+// RunixOS task and process subsystem -- Phase 3
 pub mod capability;
 pub mod ipc;
 pub mod audit;
@@ -57,7 +57,7 @@ pub const STACK_SIZE: usize = 32768; // 32 KiB stack
 /// linker places the static. The x86_64 SysV ABI requires 16-byte stack
 /// alignment, and stack pushes must be 8-aligned; an unaligned stack base is
 /// undefined behavior (and trips debug's misaligned-pointer check). Aligning the
-/// element type pins every stack — and every derived `rsp` — to a 16-byte
+/// element type pins every stack -- and every derived `rsp` -- to a 16-byte
 /// boundary regardless of the static's placement.
 #[repr(C, align(16))]
 pub struct TaskStack(pub [u8; STACK_SIZE]);
@@ -115,7 +115,7 @@ extern "C" {
 // Why this matters under Phase 11: a fresh task can be scheduled for the first
 // time *from the timer ISR* (an involuntary preemption picks it). The ISR runs
 // with IF=0, and the cooperative `switch_context` is a plain `ret` that does not
-// touch RFLAGS — so without this `sti` the task would run with interrupts
+// touch RFLAGS -- so without this `sti` the task would run with interrupts
 // disabled, no further timer tick could ever fire, and the system would wedge.
 // (Tasks resumed *after* being preempted restore IF via the ISR's `iretq`; only
 // first-run tasks need this.) Ring-3 tasks use `iret_to_user` instead and manage

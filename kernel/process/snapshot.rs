@@ -1,9 +1,9 @@
-// RunixOS system checkpoint/restore — Phase 10 (Parts 1-3): persistence
+// RunixOS system checkpoint/restore -- Phase 10 (Parts 1-3): persistence
 //
 // Scope of this module (honest boundaries):
 //   - Part 1 (persistent system state): serialize the *checkpointable* state of
-//     every task — capability table, pending IPC (rendezvous buffer + async
-//     queue), task metadata (id, state) — plus the scheduler's current task,
+//     every task -- capability table, pending IPC (rendezvous buffer + async
+//     queue), task metadata (id, state) -- plus the scheduler's current task,
 //     into a single fixed-size snapshot, and restore it.
 //   - Part 2 (process checkpointing): the per-task projection above is exactly a
 //     process checkpoint of its capability/IPC/metadata state.
@@ -17,7 +17,7 @@
 //   - cross-*reboot* durability (needs a block-write driver),
 //   - all networking / distribution (Parts 4-8).
 // So restore intentionally preserves each live task's execution context
-// (`rsp`/`cr3`/`kstack_top`) and only rolls back the serialized metadata — the
+// (`rsp`/`cr3`/`kstack_top`) and only rolls back the serialized metadata -- the
 // "functionally equivalent" state the spec asks for, without corrupting running
 // stacks.
 
@@ -191,7 +191,7 @@ pub fn info() -> Option<u64> {
 
 /// Phase 10 demonstration: checkpoint the system, simulate state loss by
 /// clearing a victim task's capability table, restore, and verify the victim's
-/// capability graph (ids + lineage included) came back intact — then confirm a
+/// capability graph (ids + lineage included) came back intact -- then confirm a
 /// re-capture reproduces the original checksum (deterministic persistence).
 ///
 /// `victim` should be a task known to hold capabilities at demo time.

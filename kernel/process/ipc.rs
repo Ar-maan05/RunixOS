@@ -1,4 +1,4 @@
-// RunixOS Rendezvous IPC System — Phase 3: structured messages
+// RunixOS Rendezvous IPC System -- Phase 3: structured messages
 //
 // Phase 3 changes over Phase 2:
 //   - `Message` gains a `tag` (IpcTag enum) and `version` field, turning the
@@ -28,7 +28,7 @@ use crate::scheduler::SCHEDULER;
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpcTag {
-    /// Untyped raw bytes — backward-compat with Phase 2 paths.
+    /// Untyped raw bytes -- backward-compat with Phase 2 paths.
     Raw     = 0,
     /// A UTF-8 log line destined for the logging service.
     Log     = 1,
@@ -150,7 +150,7 @@ impl MessageQueue {
 /// a caller-held lock is what lets the send path keep validation and use in one
 /// indivisible critical section (see `sys_send_typed`): the old design validated
 /// under its own short-lived lock and then re-locked to deliver, leaving a gap in
-/// which the capability could be revoked — the Phase 11 TOCTOU.
+/// which the capability could be revoked -- the Phase 11 TOCTOU.
 fn resolve_target_locked(
     sched: &crate::scheduler::Scheduler,
     current: TaskId,
@@ -218,12 +218,12 @@ pub fn sys_send_typed(
         //
         // The send capability is (re)validated and *used* inside one indivisible
         // region, so the authority that delivers the message is exactly the
-        // authority we just checked — never a snapshot taken before a blocking
+        // authority we just checked -- never a snapshot taken before a blocking
         // wait, and never one another task revoked in the gap between check and
         // use. This closes the TOCTOU the Phase 11 VULNERABLE/GUARDED experiment
         // reproduces, now in the real path every ring-3 sender travels.
         //
-        // The "use-point" — where the region must extend to — is deliberately
+        // The "use-point" -- where the region must extend to -- is deliberately
         // AFTER both halves of delivery: the message is deposited in the
         // receiver's `ipc_buffer` AND the receiver is marked `Ready`. The
         // guarantee is therefore "a delivered message implies the capability was
@@ -238,7 +238,7 @@ pub fn sys_send_typed(
         // blocked* is caught before the next delivery attempt.
         let outcome = {
             // The guard raises the non-preemptible count (and marks the window)
-            // and releases both when this scope ends — covering the early-return
+            // and releases both when this scope ends -- covering the early-return
             // validation-failure path too. The blocking wait below is outside it.
             let _region = crate::preempt::CriticalWindow::enter();
             let mut sched = SCHEDULER.lock();

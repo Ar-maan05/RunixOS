@@ -131,10 +131,10 @@ Everything else lives in user space.
 
 Adding preemptive scheduling (PIT timer, full-register context switch) surfaced a
 finding the cooperative scheduler had hidden: **capability *validation* and
-capability *use* were never atomic — cooperative scheduling was silently
+capability *use* were never atomic -- cooperative scheduling was silently
 donating that atomicity for free.** An IPC send validates a capability, then (in
 a separate step) uses it to deliver. Under preemption a concurrent task can
-revoke the capability in the gap, so the send delivers on revoked authority — a
+revoke the capability in the gap, so the send delivers on revoked authority -- a
 classic TOCTOU.
 
 The fix is now a system property: `ipc::sys_send_typed` / `sys_send_async` wrap
@@ -154,7 +154,7 @@ runix> sched preempt-race
 ## Interactive Console
 
 RunixOS ships a live, capability-gated **interactive console** that drives the
-real kernel paths — every command exercises an actual subsystem, not a
+real kernel paths -- every command exercises an actual subsystem, not a
 simulation. It is the single end-to-end demonstration of Phases 1–11.
 
 Enable it via `SHELL_MODE` in `kernel/boot/main.rs` (default `true`), then build
@@ -191,7 +191,7 @@ runix> migrate 1 1
 
 > The console is a ring-0 kernel task and renders over COM1 serial (the QEMU
 > window is blank by design under UEFI). When scripting it headlessly, feed one
-> command at a time — the 16-byte UART FIFO drops bulk input. See the console
+> command at a time -- the 16-byte UART FIFO drops bulk input. See the console
 > reference for the pacing pattern.
 
 ---
@@ -268,10 +268,10 @@ kernel/
 
 Documentation:
 
-* `OS_PLAN.md` — the complete phase-by-phase design directive.
-* `kernel/docs/architecture.md` — detailed implementation reference.
-* `kernel/docs/console.md` — interactive console command reference.
-* `CONSOLE_SPEC.md` — console implementation specification.
+* `OS_PLAN.md` -- the complete phase-by-phase design directive.
+* `kernel/docs/architecture.md` -- detailed implementation reference.
+* `kernel/docs/console.md` -- interactive console command reference.
+* `CONSOLE_SPEC.md` -- console implementation specification.
 
 ---
 

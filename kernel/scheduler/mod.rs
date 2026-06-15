@@ -141,7 +141,7 @@ pub fn terminate_current_task() -> ! {
 /// make it safe to run from interrupt context on a single core:
 ///
 ///   1. It acquires the scheduler lock with `try_lock`. If the interrupted task
-///      was already holding it (mid-IPC, mid-spawn, …), we must not spin — that
+///      was already holding it (mid-IPC, mid-spawn, …), we must not spin -- that
 ///      would deadlock the core. We defer the preemption to a later tick.
 ///   2. The current task is left `Ready` (it was `Running` and is merely being
 ///      time-sliced out), never blocked.

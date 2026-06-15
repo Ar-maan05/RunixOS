@@ -1,10 +1,10 @@
-// RunixOS capability audit log — Phase 8: security & capability maturity
+// RunixOS capability audit log -- Phase 8: security & capability maturity
 //
 // The kernel keeps a tamper-proof, append-only record of every capability
 // grant and revocation. It is *kernel-only*: there is no syscall that exposes
 // it to ring 3 (a future phase may add a capability-gated introspection
 // service). The log is a fixed-capacity ring buffer so it never allocates and
-// never grows without bound — under sustained churn it simply overwrites the
+// never grows without bound -- under sustained churn it simply overwrites the
 // oldest entries, and `dropped` counts how many were lost.
 
 use crate::process::TaskId;

@@ -158,11 +158,138 @@ fn dispatch(line: &[u8]) -> Result<(), ()> {
 
     match (tok0, tok1) {
         (b"help", _) => {
-            print_info!("Group A: help, cap list, cap grant <id>, cap revoke <id>, cap seal <id>, cap audit");
-            print_info!("Group B: sched info, sched timeslice, sched preempt-race");
-            print_info!("Group C: fault spawn, fault cascade <n>");
-            print_info!("Group D: ipc send <task_id> <message>, ipc typed <schema> <payload>, ipc stress <n>, service list, service restart <name>");
-            print_info!("Group E: checkpoint, restore <id>, migrate <service> <node>");
+            if tok1.is_empty() {
+                print_info!("Group A: help, cap list, cap grant <id>, cap revoke <id>, cap seal <id>, cap audit");
+                print_info!("Group B: sched info, sched timeslice, sched preempt-race");
+                print_info!("Group C: fault spawn, fault cascade <n>");
+                print_info!("Group D: ipc send <task_id> <message>, ipc typed <schema> <payload>, ipc stress <n>, service list, service restart <name>");
+                print_info!("Group E: checkpoint, restore <id>, migrate <service> <node>");
+                print_info!("Type 'help <command> [<subcommand>]' for details on a specific command.");
+            } else {
+                match tok1 {
+                    b"help" => {
+                        print_info!("help [<command> [<subcommand>]] - Display help information for commands.");
+                    }
+                    b"cap" => {
+                        match tok2 {
+                            b"" => {
+                                print_info!("cap subcommands: list, grant, revoke, seal, audit.");
+                                print_info!("Type 'help cap <subcommand>' for details.");
+                            }
+                            b"list" => {
+                                print_info!("cap list - List all capabilities currently held by the shell task.");
+                            }
+                            b"grant" => {
+                                print_info!("cap grant <slot_idx> - Attenuate rights of slot_idx and grant derived capability to task 66.");
+                            }
+                            b"revoke" => {
+                                print_info!("cap revoke <slot_idx> - Revoke capability in slot_idx and deny subsequent reuse.");
+                            }
+                            b"seal" => {
+                                print_info!("cap seal <slot_idx> - Permanently seal a capability slot, preventing its removal.");
+                            }
+                            b"audit" => {
+                                print_info!("cap audit - Print the kernel capability grant/revoke audit log trail.");
+                            }
+                            other => {
+                                let s = core::str::from_utf8(other).unwrap_or("");
+                                print_fail!("unknown cap subcommand: {}", s);
+                            }
+                        }
+                    }
+                    b"sched" => {
+                        match tok2 {
+                            b"" => {
+                                print_info!("sched subcommands: info, timeslice, preempt-race.");
+                                print_info!("Type 'help sched <subcommand>' for details.");
+                            }
+                            b"info" => {
+                                print_info!("sched info - List all system tasks, their privilege levels (ring 0/3), and states.");
+                            }
+                            b"timeslice" => {
+                                print_info!("sched timeslice - Run a 2-second time-slicing test with two preemptible kernel tasks.");
+                            }
+                            b"preempt-race" => {
+                                print_info!("sched preempt-race - Demonstrate capability validate-use atomicity vs preemption TOCTOU.");
+                            }
+                            other => {
+                                let s = core::str::from_utf8(other).unwrap_or("");
+                                print_fail!("unknown sched subcommand: {}", s);
+                            }
+                        }
+                    }
+                    b"fault" => {
+                        match tok2 {
+                            b"" => {
+                                print_info!("fault subcommands: spawn, cascade.");
+                                print_info!("Type 'help fault <subcommand>' for details.");
+                            }
+                            b"spawn" => {
+                                print_info!("fault spawn - Spawn task 71 which performs an unmapped memory read (#PF).");
+                            }
+                            b"cascade" => {
+                                print_info!("fault cascade <n> - Spawn n faulting tasks in parallel (1-8) to test fault containment.");
+                            }
+                            other => {
+                                let s = core::str::from_utf8(other).unwrap_or("");
+                                print_fail!("unknown fault subcommand: {}", s);
+                            }
+                        }
+                    }
+                    b"ipc" => {
+                        match tok2 {
+                            b"" => {
+                                print_info!("ipc subcommands: send, typed, stress.");
+                                print_info!("Type 'help ipc <subcommand>' for details.");
+                            }
+                            b"send" => {
+                                print_info!("ipc send <task_id> <message> - Send a raw Rendezvous message to the echo task (65).");
+                            }
+                            b"typed" => {
+                                print_info!("ipc typed <schema> <payload> - Send a Rendezvous message with tag (0-3) and version 2.");
+                            }
+                            b"stress" => {
+                                print_info!("ipc stress <n> - Spawn n worker pairs (1-8) ping-ponging messages for 3 seconds.");
+                            }
+                            other => {
+                                let s = core::str::from_utf8(other).unwrap_or("");
+                                print_fail!("unknown ipc subcommand: {}", s);
+                            }
+                        }
+                    }
+                    b"service" => {
+                        match tok2 {
+                            b"" => {
+                                print_info!("service subcommands: list, restart.");
+                                print_info!("Type 'help service <subcommand>' for details.");
+                            }
+                            b"list" => {
+                                print_info!("service list - List all standing ecosystem service tasks and message queue states.");
+                            }
+                            b"restart" => {
+                                print_info!("service restart <name> - Restart the named service (v1: echo).");
+                            }
+                            other => {
+                                let s = core::str::from_utf8(other).unwrap_or("");
+                                print_fail!("unknown service subcommand: {}", s);
+                            }
+                        }
+                    }
+                    b"checkpoint" => {
+                        print_info!("checkpoint - Capture an in-memory snapshot of all active task capability states.");
+                    }
+                    b"restore" => {
+                        print_info!("restore <id> - Restore task states from in-memory snapshot slot (v1: 0).");
+                    }
+                    b"migrate" => {
+                        print_info!("migrate <service> <node> - Demonstrate network-transparent IPC, migration, and replica failover.");
+                    }
+                    other => {
+                        let s = core::str::from_utf8(other).unwrap_or("");
+                        print_fail!("unknown command group: {}", s);
+                    }
+                }
+            }
         }
         (b"cap", b"list") => {
             let slots = get_shell_caps();
@@ -490,7 +617,7 @@ fn dispatch(line: &[u8]) -> Result<(), ()> {
         (b"fault", b"cascade") => {
             let n = parse_usize(tok2)?;
             if !(1..=8).contains(&n) {
-                print_fail!("fault cascade count {} out of range (expected 1..=8)", n);
+                print_fail!("fault cascade count {} out of range (expected 1-8)", n);
                 return Ok(());
             }
 
@@ -580,7 +707,7 @@ fn dispatch(line: &[u8]) -> Result<(), ()> {
         (b"ipc", b"stress") => {
             let n = parse_usize(tok2)?;
             if !(1..=8).contains(&n) {
-                print_fail!("stress count {} out of range (expected 1..=8)", n);
+                print_fail!("stress count {} out of range (expected 1-8)", n);
                 return Ok(());
             }
             

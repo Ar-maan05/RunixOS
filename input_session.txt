@@ -20,3 +20,12 @@ service restart echo
 checkpoint
 restore 0
 migrate 1 1
+\
+help cap list
+help sched info
+help fault cascade
+help ipc stress
+help service restart
+help checkpoint
+help restore
+help migrate

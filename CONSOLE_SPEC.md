@@ -1,9 +1,9 @@
-# RunixOS Interactive Console — Ironclad Implementation Specification (v2)
+# RunixOS Interactive Console -- Ironclad Implementation Specification (v2)
 
 > **How to use this document.** This is a build order for an implementer with no
 > prior knowledge of RunixOS and no authority to make design decisions. Every
 > interface, address, register, struct, string, and acceptance test is pinned
-> here. If something appears underspecified, it is a bug in this document — stop
+> here. If something appears underspecified, it is a bug in this document -- stop
 > and treat the **most conservative** reading as correct; do **not** invent
 > behavior. Implement sections in the order given. After each numbered build
 > step there is a **GATE**: a headless boot test that must pass before
@@ -41,7 +41,7 @@ G4. **Userspace is hand-written position-independent assembly blobs**, embedded
     consults it (see §6, `cap *`).
 
 G5. **Syscalls** are `int 0x80`; they exist for ring-3 blobs. The kernel shell
-    does **not** use `int 0x80` — it calls the same kernel functions the syscall
+    does **not** use `int 0x80` -- it calls the same kernel functions the syscall
     dispatcher calls, directly. Syscall numbers/ABI are documented in §3 only so
     that commands which *spawn ring-3 helpers* can drive them.
 
@@ -62,7 +62,7 @@ G7. **Verification is headless**: boot QEMU with `-serial stdio -display none`,
 
 All paths are relative to repo root. Line numbers are approximate; match by name.
 
-### 1.1 Capabilities — `kernel/process/capability.rs`
+### 1.1 Capabilities -- `kernel/process/capability.rs`
 ```rust
 pub enum Resource {
     Serial,
@@ -90,7 +90,7 @@ impl Capability { pub fn attenuate(&self, requested: RightsMask) -> Result<Capab
 pub struct RightsMask { pub read: bool, pub write: bool, pub grant: bool }
 ```
 
-### 1.2 Tasks / scheduler — `kernel/process/mod.rs`, `kernel/scheduler/mod.rs`
+### 1.2 Tasks / scheduler -- `kernel/process/mod.rs`, `kernel/scheduler/mod.rs`
 ```rust
 pub struct TaskId(pub usize);
 pub enum TaskState { Ready, Running, BlockedOnReceive, BlockedOnSend(TaskId), Terminated }
@@ -118,7 +118,7 @@ Boot PML4 (kernel tasks share it): `crate::memory::current_pml4_paddr()`. A task
 **ring 3 iff `task.cr3 != current_pml4_paddr()`**, else **ring 0**. (Ring-3 tasks
 get their own PML4 from `spawn_user`; kernel tasks reuse the boot PML4.)
 
-### 1.3 IPC — `kernel/process/ipc.rs`
+### 1.3 IPC -- `kernel/process/ipc.rs`
 ```rust
 pub enum IpcTag { Raw = 0, Log = 1, Sensor = 2, Ping = 3 }   // from_u16(v) -> Option
 pub struct Message { pub sender: TaskId, pub tag: IpcTag, pub version: u16,
@@ -134,7 +134,7 @@ pub fn sys_receive_async() -> Result<Message, IpcError>;
 capability validate→use in `preempt::CriticalWindow` (non-preemptible region).
 The shell relies on this; do not duplicate the guard.
 
-### 1.4 Preemption — `kernel/preempt/mod.rs`
+### 1.4 Preemption -- `kernel/preempt/mod.rs`
 ```rust
 pub fn set_armed(on: bool);  pub fn is_armed() -> bool;
 pub fn enter_critical();     pub fn exit_critical();     pub fn in_critical() -> bool;
@@ -157,18 +157,18 @@ crate::process::dist::demo(service_id, backing: TaskId, replica: TaskId);
 crate::process::dist::migrate(svc: ServiceId, dest: NodeId) -> Result<usize,()>;
 ```
 
-### 1.6 Syscall ABI (only for ring-3 helpers spawned by commands) — `kernel/syscall/mod.rs`
+### 1.6 Syscall ABI (only for ring-3 helpers spawned by commands) -- `kernel/syscall/mod.rs`
 `int 0x80`, number in `rax`. Args: `rdi, rsi, rdx, r8`. Numbers:
 `0 DEBUG, 1 YIELD, 2 SEND, 3 RECEIVE, 4 SERIAL_WRITE, 5 CAP_GRANT, 6 SEND_TYPED,
 7 CAP_REVOKE, 8 SEND_ASYNC, 9 RECEIVE_ASYNC, 10 SPAWN_TASK`.
 SEND_TYPED: `rdi=cap_idx, rsi=&payload, rdx=(version<<16)|tag, r8=len(<=128)`.
 
-### 1.7 Serial — `kernel/drivers/serial.rs`
+### 1.7 Serial -- `kernel/drivers/serial.rs`
 ```rust
 pub static SERIAL1: Spinlock<SerialPort>;     // COM1 @ 0x3F8, TX implemented
 crate::print!(...); crate::println!(...);     // write to SERIAL1
 ```
-**RX does not exist yet — you build it in step 1.**
+**RX does not exist yet -- you build it in step 1.**
 
 ### 1.8 Free task slots
 Occupied: `1..=4` (user ecosystem), `90..=94` (Phase 11), `100..=130` (Phases 7–10),
@@ -201,18 +201,18 @@ There is exactly one console task. It is the only task that calls
 
 ## 3. Module / file layout (create or modify exactly these)
 
-- **MODIFY** `kernel/drivers/serial.rs` — add RX (step 1).
-- **CREATE** `kernel/shell/mod.rs` — the console (steps 2–6). Declared in
+- **MODIFY** `kernel/drivers/serial.rs` -- add RX (step 1).
+- **CREATE** `kernel/shell/mod.rs` -- the console (steps 2–6). Declared in
   `kernel/boot/main.rs` as `#[path = "../shell/mod.rs"] pub mod shell;` next to
   the other `#[path=...] pub mod` lines.
-- **MODIFY** `kernel/boot/main.rs` — add `const SHELL_MODE: bool`, conditional
+- **MODIFY** `kernel/boot/main.rs` -- add `const SHELL_MODE: bool`, conditional
   boot wiring (step 5).
 
 No other files change. Do not touch Phases 1–11 code paths.
 
 ---
 
-## 4. Step 1 — Serial RX (build first)
+## 4. Step 1 -- Serial RX (build first)
 
 Add to `serial.rs`, on `impl SerialPort`:
 ```rust
@@ -265,13 +265,13 @@ Must exit 0. Remove the echo stub once green.
 
 ---
 
-## 5. Step 2 — Shell scaffold, SHELL_MODE, output format
+## 5. Step 2 -- Shell scaffold, SHELL_MODE, output format
 
 ### 5.1 SHELL_MODE
 In `main.rs` add `pub const SHELL_MODE: bool = true;`. When `true`, in `_start`:
 - **Skip** `load_phase7_harness`, `load_phase8_demo`, `load_phase9_watchdog`,
   `load_phase10_persistence`, `load_phase10_dist`, `load_phase11_preempt`, **and**
-  the perpetual user ecosystem (`spawn_init_task` + its logger/ramfs/demo loop) —
+  the perpetual user ecosystem (`spawn_init_task` + its logger/ramfs/demo loop) --
   i.e. do **not** put task 1 into the scheduler in shell mode. (Commands spawn
   what they need on demand.)
 - **Do** keep: GDT/IDT/frame-allocator init, `init_pic`, `init_pit(100)`,
@@ -343,7 +343,7 @@ prompt re-appears after the command (two `runix>` occurrences for one `help`).
 
 ---
 
-## 6. Step 3–6 — Command catalog (each fully pinned)
+## 6. Step 3–6 -- Command catalog (each fully pinned)
 
 Dispatch is a flat match on `(token0, token1)`. Unknown → 
 `FAIL "unknown command: <line>"` then `INFO "try: help"`. A command that needs a
@@ -354,18 +354,18 @@ For brevity, "list shell caps" means: iterate `root_caps` slots 0..16, skip
 `None`. "tick now" means `preempt::stats().ticks`. "arm" means
 `preempt::set_armed(true)`; always `set_armed(false)` before the command returns.
 
-### Group A — `help`, `cap *` (step 3)
+### Group A -- `help`, `cap *` (step 3)
 
-**`help`** — print one `[INFO]` line per command group listing exact syntaxes.
+**`help`** -- print one `[INFO]` line per command group listing exact syntaxes.
 Acceptance: output contains `cap list`, `ipc send`, `sched preempt-race`, `fault spawn`.
 
-**`cap list`** — for each present slot i: 
+**`cap list`** -- for each present slot i: 
 `OK "slot {i}: id={cap.id} {resource_name} r={read} w={write} g={grant} sealed={sealed} origin={origin?}"`.
 `resource_name`: `Serial` | `IpcChannel(task {t})` | `Service(#{id})` | `Memory`.
 Then `INFO "no ambient authority: {count} capabilities, nothing else reachable"`.
 Acceptance: `cap list` → contains `slot 0:` and `Serial` and `no ambient authority`.
 
-**`cap grant <id>`** — `<id>` is a slot index. If slot empty → `FAIL "no capability"`.
+**`cap grant <id>`** -- `<id>` is a slot index. If slot empty → `FAIL "no capability"`.
 Derive `cap.attenuate(RightsMask{read:true,write:true,grant:false})`; if `Err` →
 `FAIL "slot {id} lacks grant right"`. Spawn a fresh scratch task at slot **66**
 (`Task::new(TaskId(66), park, CapTable::new())`, `park` = `terminate_current_task`),
@@ -373,7 +373,7 @@ insert the derived cap into **its** table, set its `origin = Some(donor.id)`, re
 back the stamped id. Print `OK "granted: new token id={newid} origin={donorid} -> task 66"`.
 Acceptance: `cap grant 0` → contains `granted:` and `origin=`.
 
-**`cap revoke <id>`** — `<id>` is a slot in the shell's table. 
+**`cap revoke <id>`** -- `<id>` is a slot in the shell's table. 
 `root_caps.kernel_revoke(id)`; if it returned `None` → `FAIL "slot {id} empty"`.
 Then immediately attempt to *use* it: `cap list` re-scan shows the slot gone, and
 if the revoked cap was `Serial` (slot 0) attempt a `SerialWrite`-style check by
@@ -381,26 +381,26 @@ calling `current_has_serial_cap`-equivalent against the shell table; print
 `OK "revoked id={id}; re-use denied (slot now empty)"`.
 Acceptance: `cap revoke 2` then `cap list` → second listing does **not** contain `Service(#1)`.
 
-**`cap seal <id>`** — set `slots[id].sealed = true` (direct field write under lock).
+**`cap seal <id>`** -- set `slots[id].sealed = true` (direct field write under lock).
 Then call `root_caps.remove(id)`; it must return `Err(())`. Print
 `OK "sealed id={id}; holder remove() -> Err (locked)"`. If slot empty → `FAIL`.
 Acceptance: `cap seal 0` → contains `locked`.
 
-**`cap audit`** — call `crate::process::audit::dump()` (prints its own lines), then
+**`cap audit`** -- call `crate::process::audit::dump()` (prints its own lines), then
 `INFO "audit trail above"`. Acceptance: `cap audit` → exit 0 (no crash); output
 contains either an audit line or `audit trail above`.
 
 GATE A: run all of the above piped as one session; assert each acceptance substring.
 
-### Group B — `sched *` (step 4)
+### Group B -- `sched *` (step 4)
 
-**`sched info`** — lock SCHEDULER; for each present slot: determine ring via
+**`sched info`** -- lock SCHEDULER; for each present slot: determine ring via
 `task.cr3 != memory::current_pml4_paddr()` (ring3) else ring0; map state to
 `run|ready|recv|send|term`. Print `OK "task {id}: ring{0|3} {state}"`. Footer:
 `INFO "ticks={tick} armed={preempt::is_armed()}"`.
 Acceptance: `sched info` → contains `task 64: ring0` (the shell itself, running).
 
-**`sched timeslice`** — reproduce Phase 11 part A but shell-driven:
+**`sched timeslice`** -- reproduce Phase 11 part A but shell-driven:
 1. spawn two never-yielding counter tasks at slots **67, 68** (each: `sti`,
    then `loop { COUNTER[x]+=1; if ticks-start >= 200 break; }`, then terminate).
    200 ticks = 2 s.
@@ -410,7 +410,7 @@ Acceptance: `sched info` → contains `task 64: ring0` (the shell itself, runnin
    else `FAIL`.
 Acceptance: `sched timeslice` → contains `[PASS]` and `time-sliced`.
 
-**`sched preempt-race`** — reproduce Phase 11 part B in the shell, using the real
+**`sched preempt-race`** -- reproduce Phase 11 part B in the shell, using the real
 `preempt` adversary against a real cap in a scratch victim task (slot **69**):
 1. VULNERABLE: install an `IpcChannel{target:70}` cap in task 69 slot 0; record id.
    `set_armed(true); arm_adversary(69,0); reset_window_ticks(); enter_ipc_window();`
@@ -426,9 +426,9 @@ Acceptance: `sched preempt-race` → contains both `[VULN]` and `[PASS]`.
 
 GATE B: piped session; assert substrings above.
 
-### Group C — `fault *` (step 5)
+### Group C -- `fault *` (step 5)
 
-**`fault spawn`** — spawn one task at slot **71** whose entry does
+**`fault spawn`** -- spawn one task at slot **71** whose entry does
 `unsafe { read_volatile(0x0000_1234_5678 as *const u64) }` (an unmapped read →
 `#PF`). `yield_cpu()` a few times so it runs and faults (the IDT handler prints
 `[FAULT] ... in task 71 ...` and terminates it). Then verify the shell (task 64)
@@ -437,43 +437,43 @@ task 71 is now `Terminated` or `None`. Print
 `OK "task 71 faulted (#PF) and was contained; kernel + {n} tasks alive"`.
 Acceptance: `fault spawn` → contains `[FAULT]` (from kernel) and `contained`.
 
-**`fault cascade <n>`** — `n` in `1..=8`. Spawn `n` faulting tasks at slots
+**`fault cascade <n>`** -- `n` in `1..=8`. Spawn `n` faulting tasks at slots
 `72..72+n`, each like `fault spawn`. Yield until all are gone. Print one
 `OK "task {s} contained"` per task and a footer `PASS "isolation held under {n} concurrent faults"`.
 Acceptance: `fault cascade 3` → contains `[PASS]` and `isolation held under 3`.
 
 GATE C: piped session.
 
-### Group D — `ipc *`, `service *` (step 6)
+### Group D -- `ipc *`, `service *` (step 6)
 
-**`ipc send <task_id> <message>`** — `<task_id>` must equal **65** (the echo
+**`ipc send <task_id> <message>`** -- `<task_id>` must equal **65** (the echo
 service; if not 65 → `FAIL "only task 65 (echo) is reachable in v1"`). Lazily
 spawn the echo service at slot 65 if absent (kernel task: loops
-`sys_receive_typed()` then re-sends `Raw` back to sender — needs an `IpcChannel`
+`sys_receive_typed()` then re-sends `Raw` back to sender -- needs an `IpcChannel`
 cap to the shell; install it at spawn). Record `t0=tick`. `sys_send_typed(1, Raw,
 1, msg)` over shell slot 1. On `Ok`: `OK "sent {len}B to task 65"`, then
 `INFO "round-trip ~{(tick-t0)*10} ms"`. On `Err(e)`: `FAIL "{e:?}"`.
 Acceptance: `ipc send 65 hello` → contains `sent` and `round-trip`.
 
-**`ipc typed <schema> <payload>`** — `<schema>` parsed as `u16` tag (0..=3 valid;
+**`ipc typed <schema> <payload>`** -- `<schema>` parsed as `u16` tag (0..=3 valid;
 else `FAIL "schema must be 0..3"`). `sys_send_typed(1, schema, 2, payload)` to the
 echo service; print `OK "typed send tag={schema} ver=2 {len}B"`, and on the echo
 reply `INFO "echo tag={tag} '{payload}'"`. 
 Acceptance: `ipc typed 1 hi` → contains `tag=1`.
 
-**`ipc stress <n>`** — `n` in `1..=8`. Spawn `n` worker pairs in slots `73..80`
+**`ipc stress <n>`** -- `n` in `1..=8`. Spawn `n` worker pairs in slots `73..80`
 that ping-pong `Raw` messages for 300 ticks (3 s) under `set_armed(true)`,
 counting deliveries in a shared `static AtomicU64`. After the deadline disarm,
 terminate workers, print `PASS "stress: {count} msgs in 3s = {count/3}/s, dropped=0"`.
 Acceptance: `ipc stress 2` → contains `[PASS]` and `msgs in 3s`.
 
-**`service list`** — like `sched info` but only tasks in slots `1..=4` and
+**`service list`** -- like `sched info` but only tasks in slots `1..=4` and
 `65` with a known name table: `{1:init,2:logger,3:ramfs,4:demo,65:echo}`. Print
 `OK "service {name} (task {id}): {state}, caps={count}, queue={msg_queue.count}"`.
 If none present (shell mode suppresses 1..4): `INFO "no standing services; spawn via ipc/echo"`.
 Acceptance: `service list` → contains `service` or `no standing services`.
 
-**`service restart <name>`** — only `<name>=="echo"` supported in v1. Terminate
+**`service restart <name>`** -- only `<name>=="echo"` supported in v1. Terminate
 task 65, respawn it with a fresh cap set, print lifecycle:
 `INFO "echo: shutdown"`, `INFO "echo: respawn (task 65)"`, `INFO "echo: caps redistributed"`,
 `PASS "service echo recovered"`. Other names → `FAIL "unknown service: <name>"`.
@@ -481,23 +481,23 @@ Acceptance: `service restart echo` → contains `[PASS]` and `recovered`.
 
 GATE D: piped session.
 
-### Group E — Phase 10 commands (step 7)
+### Group E -- Phase 10 commands (step 7)
 
-**`checkpoint`** — call `snapshot::capture()`; `let sum = snapshot::info()`. Print
+**`checkpoint`** -- call `snapshot::capture()`; `let sum = snapshot::info()`. Print
 `OK "checkpoint taken: id=0 checksum={sum:#x}"`, then `INFO "captured {k} task cap-tables"`
 where `k` = count of present tasks at capture. (Snapshot is a single in-memory
 slot; "id" is always 0.) Acceptance: `checkpoint` → contains `checksum=0x`.
 
-**`restore <id>`** — `<id>` must be `0` (only one snapshot slot; else
+**`restore <id>`** -- `<id>` must be `0` (only one snapshot slot; else
 `FAIL "no snapshot id {id}"`). Call `snapshot::restore()`; on `Ok(k)`:
 `OK "restored {k} task checkpoints; checksum verified"`; on `Err`:
 `FAIL "no valid snapshot (run checkpoint first)"`.
 Acceptance: `checkpoint` then `restore 0` → second contains `restored`.
 
-**`migrate <service> <node>`** — `<service>` must be `1`, `<node>` must be `1`
+**`migrate <service> <node>`** -- `<service>` must be `1`, `<node>` must be `1`
 (the simulated remote node; else `FAIL "v1 supports: migrate 1 1"`). This calls
 `dist::demo(1, TaskId(75), TaskId(76))` (it spawns its own scratch tasks at the
-given slots — use 75,76 which are inside the console pool) which prints the full
+given slots -- use 75,76 which are inside the console pool) which prints the full
 migrate/failover handshake. Then `PASS "service 1 migrated node0->node1, capability stable"`.
 Acceptance: `migrate 1 1` → contains `[dist]` (from the real path) and `[PASS]`.
 
@@ -505,7 +505,7 @@ GATE E: piped session.
 
 ---
 
-## 7. Out of scope for v1 (explicit — do NOT attempt)
+## 7. Out of scope for v1 (explicit -- do NOT attempt)
 
 These have no real kernel path and must **not** be faked. If invoked, print the
 exact `FAIL`/`INFO` shown:
@@ -515,7 +515,7 @@ exact `FAIL`/`INFO` shown:
   within one boot session only; say so in `help`.
 - `migrate` to a real second machine / NIC (the node is simulated in-kernel).
 - Arbitrary `ipc send <task_id>` to any task (only the echo service, task 65).
-- Line history / arrow keys (backspace only — G stated in §4).
+- Line history / arrow keys (backspace only -- G stated in §4).
 
 ---
 
@@ -523,7 +523,7 @@ exact `FAIL`/`INFO` shown:
 
 A single **paced** session must pass headlessly. The guest UART has a 16-byte RX
 FIFO and no flow control, so you **must not** bulk-pipe (`cat session.txt | qemu`)
-— the FIFO overflows and most commands are lost. Feed one command at a time with
+-- the FIFO overflows and most commands are lost. Feed one command at a time with
 a delay sized to that command (the timed commands run for seconds), and send a
 throwaway newline first so the boot-time first-byte drop cannot eat a real
 command:
@@ -543,9 +543,9 @@ feed | timeout 90 qemu-system-x86_64 -M q35 \
   -drive file=disk.img,format=raw,media=disk -serial stdio -display none -m 2G \
   2>/dev/null | sed 's/\x1b\[[0-9;]*[mGKHJ]//g' > /tmp/out.txt
 ```
-(Interactive use over a real terminal via `./run.sh` needs none of this pacing —
+(Interactive use over a real terminal via `./run.sh` needs none of this pacing --
 you type at human speed, well within the FIFO.)
-**Acceptance — `/tmp/out.txt` must contain ALL of:**
+**Acceptance -- `/tmp/out.txt` must contain ALL of:**
 1. `no ambient authority`            (cap list)
 2. `granted: new token id=`          (cap grant)
 3. `locked`                          (cap seal)

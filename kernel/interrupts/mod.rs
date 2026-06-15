@@ -213,7 +213,7 @@ extern "C" {
 // `timer_isr` decides to preempt) reuses the *cooperative* `switch_context`: it
 // saves this stack's rsp into the task and loads the next task's. Because both
 // voluntary yields and timer preemptions leave a `switch_context` frame on top
-// of a suspended task's stack, the two paths unify — a preempted task is
+// of a suspended task's stack, the two paths unify -- a preempted task is
 // resumed exactly like one that yielded, and on its way back out this stub
 // restores the full register file and `iretq`s to the interrupted instruction.
 

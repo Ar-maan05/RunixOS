@@ -1,7 +1,7 @@
-# RunixOS Interactive Console — Command Reference
+# RunixOS Interactive Console -- Command Reference
 
 The interactive console is a live, capability-gated shell that drives **the real
-kernel paths** — every command exercises an actual subsystem, not a simulation.
+kernel paths** -- every command exercises an actual subsystem, not a simulation.
 It is the capstone demonstration of the project: each research contribution
 (Phases 1–11) is reachable through a single command.
 
@@ -32,7 +32,7 @@ With `SHELL_MODE = true`, build and run, then type commands over the serial line
 ./build_disk.sh && ./run.sh        # serial is wired to your terminal (stdio)
 ```
 
-Headless / scripted (note the pacing — see *Serial pacing* below):
+Headless / scripted (note the pacing -- see *Serial pacing* below):
 
 ```bash
 ( sleep 4; printf 'cap list\n'; sleep 2; printf 'sched preempt-race\n'; sleep 5 ) | \
@@ -47,23 +47,23 @@ Prompt: `runix> ` · Line editing: backspace (`\b` / DEL) · Terminator: Enter.
 
 | Tag      | Color  | Meaning                                            |
 |----------|--------|----------------------------------------------------|
-| `[CMD]`  | —      | echo of the command you entered                    |
+| `[CMD]`  | --      | echo of the command you entered                    |
 | `[OK]`   | green  | success result                                     |
 | `[FAIL]` | red    | failure result (with reason)                       |
 | `[INFO]` | white  | informational output                               |
 | `[WARN]` | yellow | non-fatal anomaly                                  |
-| `[PASS]` | cyan   | research demo result — expected outcome confirmed  |
-| `[VULN]` | yellow | research demo result — vulnerability demonstrated (intentional) |
+| `[PASS]` | cyan   | research demo result -- expected outcome confirmed  |
+| `[VULN]` | yellow | research demo result -- vulnerability demonstrated (intentional) |
 
 ---
 
 ## Commands
 
-### Capability system — Phases 1, 3, 8
+### Capability system -- Phases 1, 3, 8
 
 | Command | Description | Real path |
 |---|---|---|
-| `cap list` | Print the shell's full capability table: token id, resource, rights (r/w/grant), sealed flag, derivation origin. Ends with a "no ambient authority" line — what isn't listed does not exist to this process. | `CapTable::slots` |
+| `cap list` | Print the shell's full capability table: token id, resource, rights (r/w/grant), sealed flag, derivation origin. Ends with a "no ambient authority" line -- what isn't listed does not exist to this process. | `CapTable::slots` |
 | `cap grant <id>` | Derive an attenuated child capability from slot `<id>` and install it into a fresh task (slot 66); print the new globally-unique token id and its `origin` lineage. Fails if the slot lacks the `grant` right. | `Capability::attenuate` + `CapTable::insert` |
 | `cap revoke <id>` | Revoke the capability in slot `<id>` and immediately confirm the slot is now unreachable. | `CapTable::kernel_revoke` |
 | `cap seal <id>` | Seal slot `<id>` so the holder can no longer remove it; demonstrate that `remove()` now returns `Err`. | `Capability::sealed` + `CapTable::remove` |
@@ -77,7 +77,7 @@ runix> cap list
 [INFO]  no ambient authority: 3 capabilities, nothing else reachable
 ```
 
-### IPC — Phases 1, 5, 7
+### IPC -- Phases 1, 5, 7
 
 | Command | Description | Real path |
 |---|---|---|
@@ -85,13 +85,13 @@ runix> cap list
 | `ipc typed <schema> <payload>` | Send a typed, schema-versioned message (`<schema>` = tag `0..3`); print the schema and the echoed reply. | `ipc::sys_send_typed` |
 | `ipc stress <n>` | Run `n` worker pairs exchanging messages for 3 s under the timer; print total messages, throughput, and dropped count. | async IPC + `preempt::stats` clock |
 
-### Scheduler — Phase 11
+### Scheduler -- Phase 11
 
 | Command | Description | Real path |
 |---|---|---|
 | `sched info` | List every task: id, ring level (0/3, derived from `cr3`), state, plus the live tick count and whether preemption is armed. | `SCHEDULER.tasks` |
 | `sched timeslice` | Spawn two tasks that **never yield** and run them ~2 s under the PIT timer; print each task's progress. Cooperative scheduling could never have run the second one. | `preempt::set_armed` + timer ISR |
-| `sched preempt-race` | Reproduce the Phase 11 capability-atomicity finding side by side: **VULNERABLE** (an unguarded validate→use where a revoker wins mid-window and the capability is gone at use) vs **GUARDED** (the same window made non-preemptible — the revoker is deferred and the capability survives). | `preempt` adversary + `CriticalWindow` |
+| `sched preempt-race` | Reproduce the Phase 11 capability-atomicity finding side by side: **VULNERABLE** (an unguarded validate→use where a revoker wins mid-window and the capability is gone at use) vs **GUARDED** (the same window made non-preemptible -- the revoker is deferred and the capability survives). | `preempt` adversary + `CriticalWindow` |
 
 ```
 runix> sched preempt-race
@@ -99,33 +99,33 @@ runix> sched preempt-race
 [PASS]  non-preemptible region: tick landed but revoker deferred; cap intact
 ```
 
-### Fault containment — Phase 4
+### Fault containment -- Phase 4
 
 | Command | Description | Real path |
 |---|---|---|
 | `fault spawn` | Spawn a task that triggers a page fault; the IDT handler terminates only that task and the kernel continues. Prints the fault type, the terminated task id, and survivor count. | IDT `#PF` handler + `terminate_current_task` |
 | `fault cascade <n>` | Spawn `n` (1–8) simultaneously faulting tasks; show isolation holds under concurrent failure. | same, ×n |
 
-### Services — Phases 6, 9
+### Services -- Phases 6, 9
 
 | Command | Description | Real path |
 |---|---|---|
 | `service list` | List running ring-3 services: name, task id, state, capability count, message-queue depth. | `SCHEDULER.tasks` + name table |
-| `service restart <name>` | Restart a named service (v1: `echo`); print the lifecycle — shutdown → respawn → capability redistribution → recovery. | `terminate_current_task` + respawn |
+| `service restart <name>` | Restart a named service (v1: `echo`); print the lifecycle -- shutdown → respawn → capability redistribution → recovery. | `terminate_current_task` + respawn |
 
-### Persistence & distribution — Phase 10
+### Persistence & distribution -- Phase 10
 
 | Command | Description | Real path |
 |---|---|---|
 | `checkpoint` | Capture a full in-memory system snapshot; print the snapshot id, integrity checksum, and number of captured cap-tables. | `snapshot::capture` |
-| `restore <id>` | Restore from snapshot `<id>` (v1: only `0`); verify the checksum. In-memory only — not durable across reboot. | `snapshot::restore` |
+| `restore <id>` | Restore from snapshot `<id>` (v1: only `0`); verify the checksum. In-memory only -- not durable across reboot. | `snapshot::restore` |
 | `migrate <service> <node>` | Migrate a service to a simulated remote node (v1: `migrate 1 1`); print the full transparent-IPC migration and failover handshake. | `dist::demo` / `dist::migrate` |
 
 ### Meta
 
 | Command | Description |
 |---|---|
-| `help` | List all command groups and syntaxes. |
+| `help [<command> [<subcommand>]]` | List all command groups and syntaxes, or display detailed usage instructions for a specific command/subcommand (e.g. `help cap list`). |
 | *(unknown)* | Prints `[FAIL] unknown command: <input>` and `[INFO] try: help`. |
 
 ---
@@ -134,13 +134,13 @@ runix> sched preempt-race
 
 | Command | Research contribution |
 |---|---|
-| `cap list / grant / revoke / seal / audit` | Phase 1, 3, 8 — capability enforcement, attenuation, sealing, revocation propagation, audit trail |
-| `ipc send / typed / stress` | Phase 1, 5, 7 — rendezvous + async IPC, structured messages, scaling |
-| `sched info / timeslice` | Phase 11 — cooperative + preemptive scheduling coexisting |
-| `sched preempt-race` | Phase 11 — capability validate→use atomicity (the central finding) |
-| `fault spawn / cascade` | Phase 4 — fault containment and isolation under concurrent failure |
-| `service list / restart` | Phase 6, 9 — userspace ecosystem and service recovery |
-| `checkpoint / restore / migrate` | Phase 10 — persistent system state and transparent migration |
+| `cap list / grant / revoke / seal / audit` | Phase 1, 3, 8 -- capability enforcement, attenuation, sealing, revocation propagation, audit trail |
+| `ipc send / typed / stress` | Phase 1, 5, 7 -- rendezvous + async IPC, structured messages, scaling |
+| `sched info / timeslice` | Phase 11 -- cooperative + preemptive scheduling coexisting |
+| `sched preempt-race` | Phase 11 -- capability validate→use atomicity (the central finding) |
+| `fault spawn / cascade` | Phase 4 -- fault containment and isolation under concurrent failure |
+| `service list / restart` | Phase 6, 9 -- userspace ecosystem and service recovery |
+| `checkpoint / restore / migrate` | Phase 10 -- persistent system state and transparent migration |
 
 ---
 
@@ -154,11 +154,11 @@ for headless scripting:
    after boot before the first command.
 2. **Do not bulk-pipe** all commands at once (`cat session.txt | qemu`): the FIFO
    overflows and most commands are lost. Feed one command at a time, pausing
-   long enough for each to finish — the timed commands (`sched timeslice`,
+   long enough for each to finish -- the timed commands (`sched timeslice`,
    `sched preempt-race`, `ipc stress`) run for several seconds. The launch
    snippet above shows the pattern.
 
-Interactive use over a real terminal (`./run.sh`) is unaffected — you type at
+Interactive use over a real terminal (`./run.sh`) is unaffected -- you type at
 human speed, well within the FIFO.
 
 ---

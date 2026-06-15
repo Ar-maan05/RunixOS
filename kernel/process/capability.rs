@@ -1,4 +1,4 @@
-// RunixOS capability system — Phase 3: sealing, rights attenuation, grant
+// RunixOS capability system -- Phase 3: sealing, rights attenuation, grant
 //
 // Phase 3 additions over Phase 2:
 //   - `sealed` flag: a sealed capability cannot be removed by the holder;
@@ -34,7 +34,7 @@ pub enum Resource {
     MemoryMapping { start_vaddr: usize, size: usize, writeable: bool },
     /// Phase 10: a *location-independent* reference to a service by id. Unlike
     /// `IpcChannel`, which names a concrete local task, this names a service that
-    /// the distribution layer may resolve to a local task or a remote node — and
+    /// the distribution layer may resolve to a local task or a remote node -- and
     /// that resolution can change (migration) without invalidating the holder's
     /// capability. This is what makes a capability "identify a service rather
     /// than a physical machine location".
@@ -88,7 +88,7 @@ impl Capability {
             // The grantee never inherits the grant right unless explicitly
             // requested *and* the donor has it (already checked above).
             grant:  self.grant && requested.grant,
-            // Sealed-ness is never inherited through grant — the recipient
+            // Sealed-ness is never inherited through grant -- the recipient
             // gets an unsealed copy; the kernel seals at task-creation time.
             sealed: false,
             // Identity is assigned when the cap is installed into a slot.
@@ -154,7 +154,7 @@ impl CapTable {
 
     /// Revokes/removes a capability by index.
     ///
-    /// Returns `Err(())` if the slot is **sealed** — sealed capabilities can
+    /// Returns `Err(())` if the slot is **sealed** -- sealed capabilities can
     /// only be revoked by the kernel through its own revocation path (Phase 4).
     pub fn remove(&mut self, idx: usize) -> Result<Option<Capability>, ()> {
         if idx >= MAX_CAPS {

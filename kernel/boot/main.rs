@@ -63,7 +63,7 @@ pub extern "C" fn _start() -> ! {
         core::ptr::read_volatile(&memory::HHDM_REQUEST);
     }
 
-    // Initialize serial console (must be first — everything below may print).
+    // Initialize serial console (must be first -- everything below may print).
     drivers::serial::SERIAL1.lock().init();
 
     println!("RunixOS kernel initialized.");
@@ -330,7 +330,7 @@ const MAX_RESTARTS: usize = 2;
 /// it). Incarnations 0 and 1 crash on purpose; incarnation 2 runs stably.
 static FRAGILE_INCARNATION: AtomicUsize = AtomicUsize::new(0);
 
-/// Builds the capability set handed to each fresh incarnation of the service —
+/// Builds the capability set handed to each fresh incarnation of the service --
 /// i.e. capabilities are *redistributed* on every restart, never inherited from
 /// the dead incarnation.
 fn fragile_service_caps() -> process::CapTable {
@@ -390,7 +390,7 @@ extern "C" fn task_watchdog() -> ! {
 
         // Read the monitored service's liveness. We release the lock here and
         // re-acquire it below to restart; that gap is safe ONLY because the
-        // scheduler is cooperative — no task runs between our `yield_cpu`
+        // scheduler is cooperative -- no task runs between our `yield_cpu`
         // returns, so nothing can mutate the slot in between. This TOCTOU window
         // would need closing if preemption is ever added.
         let terminated = {
@@ -482,7 +482,7 @@ fn load_phase10_dist() {
         Some(Task::new(TaskId(DIST_REPLICA), dist_scratch_entry, CapTable::new()));
 }
 
-/// Capabilities the demo service "owns" — carried across migration to prove
+/// Capabilities the demo service "owns" -- carried across migration to prove
 /// state preservation (Part 7).
 fn dist_service_caps() -> process::CapTable {
     let mut caps = process::CapTable::new();
@@ -524,7 +524,7 @@ extern "C" fn task_dist_demo() -> ! {
 //      then delivery @ipc.rs:199). Cooperative scheduling made that gap atomic
 //      for free. Here we open that exact window under preemption and let a
 //      modelled concurrent revoker run inside it (the deterministic adversary in
-//      `preempt`): the capability is valid at validation and GONE at use — a
+//      `preempt`): the capability is valid at validation and GONE at use -- a
 //      send on revoked authority. Then we wrap the same window in a
 //      non-preemptible region and show the revoker is deferred and the operation
 //      becomes atomic again.
@@ -558,7 +558,7 @@ fn load_phase11_preempt() {
     sched.tasks[PREEMPT_BUSY_B] =
         Some(Task::new(TaskId(PREEMPT_BUSY_B), task_busy_b, CapTable::new()));
     // Container tasks: the victim holds the capability under test; the server is
-    // the target it authorizes. Neither needs to run, so each parks by exiting —
+    // the target it authorizes. Neither needs to run, so each parks by exiting --
     // a terminated task is never scheduled but its cap table remains readable.
     sched.tasks[PREEMPT_VICTIM] =
         Some(Task::new(TaskId(PREEMPT_VICTIM), task_park, CapTable::new()));
@@ -571,7 +571,7 @@ extern "C" fn task_park() -> ! {
 }
 
 /// A compute task that never voluntarily yields. It runs until the global tick
-/// count advances by `BUSY_TICK_BUDGET` — progress it can only make if the timer
+/// count advances by `BUSY_TICK_BUDGET` -- progress it can only make if the timer
 /// is slicing it in and out. Increments a counter so the driver can prove it ran.
 extern "C" fn task_busy_a() -> ! {
     while !GO_BUSY.load(Ordering::SeqCst) {
@@ -579,7 +579,7 @@ extern "C" fn task_busy_a() -> ! {
     }
     // We may have been resumed from an interrupts-disabled context (e.g. a user
     // task's syscall yield) while parked above. The measured loop never yields,
-    // so it relies entirely on the timer to make progress — explicitly enable
+    // so it relies entirely on the timer to make progress -- explicitly enable
     // interrupts so a tick can actually preempt us.
     unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
     let start = preempt::stats().ticks;
@@ -676,7 +676,7 @@ extern "C" fn task_preempt_demo() -> ! {
 }
 
 /// Installs the capability under test into the victim's table and returns its
-/// (slot, id). It is an IpcChannel authorizing a send to the server task — the
+/// (slot, id). It is an IpcChannel authorizing a send to the server task -- the
 /// exact resource kind `resolve_target` validates in the real send path.
 fn install_victim_cap() -> (usize, u64) {
     use process::{Capability, Resource, TaskId};
@@ -733,7 +733,7 @@ fn ipc_toctou_experiment() {
     // VALIDATE: authority is checked here (capability present).
     let validated = victim_cap_id(slot);
 
-    // Open the exact gap between validation and use, then let a tick land — a
+    // Open the exact gap between validation and use, then let a tick land -- a
     // tick we permit to act, modelling a concurrent revoker task being scheduled.
     preempt::enter_ipc_window();
     let wt_vuln = spin_until_window_tick();

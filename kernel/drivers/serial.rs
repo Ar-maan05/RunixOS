@@ -43,7 +43,7 @@ impl<T> Spinlock<T> {
     /// Non-blocking acquire. Returns `None` if the lock is already held.
     ///
     /// Required by the preemption layer: a timer ISR must never *spin* on the
-    /// scheduler lock — if the interrupted code holds it, spinning would
+    /// scheduler lock -- if the interrupted code holds it, spinning would
     /// deadlock the single core. The ISR uses this to detect that case and
     /// defer the preemption instead.
     pub fn try_lock(&self) -> Option<SpinlockGuard<'_, T>> {

@@ -1,9 +1,9 @@
-// RunixOS distribution substrate — Phase 10 (Parts 4-8)
+// RunixOS distribution substrate -- Phase 10 (Parts 4-8)
 //
 // This layer demonstrates network-transparent IPC, distributed capabilities,
 // and service migration *at the architecture level*. The programming model is
 // the spec's invariant: a client always does "send to a capability"; whether the
-// target service is local or on another node — and whether it just migrated — is
+// target service is local or on another node -- and whether it just migrated -- is
 // invisible to the client.
 //
 // HONEST BOUNDARY: there is no physical NIC in this build. A "remote node" is a
@@ -12,7 +12,7 @@
 // message + hand it to a node) precisely so a real virtio-net/e1000 backend
 // could later implement it without changing the routing, capability, or
 // migration logic above it. What is demonstrated here is the routing/migration
-// machinery and programming-model invariance — not wire I/O.
+// machinery and programming-model invariance -- not wire I/O.
 //
 // Mapping to OS_PLAN Phase 10:
 //   Part 4 network-transparent IPC : `route_send` resolves a ServiceId to a
@@ -143,7 +143,7 @@ fn count_caps(t: &CapTable) -> usize {
 static REGISTRY: Spinlock<ServiceRegistry> = Spinlock::new(ServiceRegistry::new());
 static REMOTE: Spinlock<RemoteNode> = Spinlock::new(RemoteNode::new(NodeId(1)));
 
-/// Outcome of a transparent send — reported only for the demo; a real client
+/// Outcome of a transparent send -- reported only for the demo; a real client
 /// never inspects this (the point is it does not need to).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Routed {
@@ -159,7 +159,7 @@ pub fn register(svc: ServiceId, loc: Location) {
 
 /// Network-transparent send (Part 4). Resolves the capability's `ServiceId` to
 /// its current `Location` and delivers either to the local task or across the
-/// transport to the hosting node. The caller passes a capability and a payload —
+/// transport to the hosting node. The caller passes a capability and a payload --
 /// identical whether the service is local, remote, or just migrated.
 pub fn route_send(cap: &Capability, payload: &[u8]) -> Routed {
     let svc = match cap.resource {
@@ -213,7 +213,7 @@ fn transport_send(node: NodeId, msg: Message) {
 ///
 /// 1. Checkpoint the local task's serializable state (capabilities + IPC + meta).
 /// 2. Transfer the checkpoint to the destination node and restore it there.
-/// 3. Re-point the route to `Remote(dest)` — atomically, so the next send goes
+/// 3. Re-point the route to `Remote(dest)` -- atomically, so the next send goes
 ///    over the transport without the client's capability changing.
 /// 4. Tear down the local task instance.
 ///
@@ -253,7 +253,7 @@ pub fn migrate(svc: ServiceId, dest: NodeId) -> Result<usize, ()> {
     Ok(caps)
 }
 
-/// Drains the simulated remote node's inbox — the "remote kernel" delivering
+/// Drains the simulated remote node's inbox -- the "remote kernel" delivering
 /// queued transport messages to the migrated service. Returns how many it
 /// processed; prints each so the demo can show they arrived on the other node.
 pub fn pump_remote() -> usize {
@@ -349,7 +349,7 @@ pub fn demo(service_id: usize, backing: TaskId, replica: TaskId) {
         migrated_caps, remote_caps
     );
 
-    // Transparent sends AFTER migration — SAME capability, no client change.
+    // Transparent sends AFTER migration -- SAME capability, no client change.
     for m in ["gamma", "delta"] {
         match route_send(&client_cap, m.as_bytes()) {
             Routed::Remote(n) => { crate::println!("[dist] client send \"{}\" -> REMOTE via transport (node {}), client unaware.", m, n.0); }

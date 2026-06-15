@@ -1,4 +1,4 @@
-// RunixOS syscall surface — Phase 3: structured dispatch + capability grant
+// RunixOS syscall surface -- Phase 3: structured dispatch + capability grant
 //
 // RunixOS has no traditional syscall model. The `int 0x80` trap is purely the
 // ring-3 -> ring-0 transport. Every request is validated against the caller's
@@ -529,7 +529,7 @@ fn dispatch_cap_revoke(
                 cap.resource,
                 cap_idx,
             );
-            // Phase 8: revocation propagation — revoke every capability derived
+            // Phase 8: revocation propagation -- revoke every capability derived
             // (transitively) from the one just removed.
             propagate_revocation(&mut sched, cap.id);
             0

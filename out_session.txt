@@ -11,9 +11,9 @@ Memory Map Entries:
   Base: 0x812000, Length: 0x1000, Type: 1
   Base: 0x813000, Length: 0x1000, Type: 0
   Base: 0x814000, Length: 0xec000, Type: 3
-  Base: 0x900000, Length: 0x78811000, Type: 0
-  Base: 0x79111000, Length: 0x4f9000, Type: 6
-  Base: 0x7960a000, Length: 0x662000, Type: 5
+  Base: 0x900000, Length: 0x7880a000, Type: 0
+  Base: 0x7910a000, Length: 0x4fc000, Type: 6
+  Base: 0x79606000, Length: 0x666000, Type: 5
   Base: 0x79c6c000, Length: 0x40fa000, Type: 0
   Base: 0x7dd66000, Length: 0x5000, Type: 1
   Base: 0x7dd6b000, Length: 0x9000, Type: 0
@@ -36,7 +36,7 @@ Memory Map Entries:
   Base: 0x80000000, Length: 0x3e8000, Type: 7
   Base: 0xe0000000, Length: 0x10000000, Type: 1
   Base: 0xfd00000000, Length: 0x300000000, Type: 1
-Frame Allocator initialized. Usable start: 0x900000, end: 0x79111000
+Frame Allocator initialized. Usable start: 0x900000, end: 0x7910a000
 GDT + TSS installed (kernel & user segments active).
 IDT installed: CPU exceptions are now caught.
 SHELL MODE active. Launching scheduler...
@@ -49,6 +49,7 @@ runix> help
 [INFO]  Group C: fault spawn, fault cascade <n>
 [INFO]  Group D: ipc send <task_id> <message>, ipc typed <schema> <payload>, ipc stress <n>, service list, service restart <name>
 [INFO]  Group E: checkpoint, restore <id>, migrate <service> <node>
+[INFO]  Type 'help <command> [<subcommand>]' for details on a specific command.
 runix> cap list
 [CMD]   cap list
 [OK]    slot 0: id=1 Serial r=false w=true g=true sealed=false origin=None
@@ -76,10 +77,10 @@ runix> sched info
 [CMD]   sched info
 [OK]    task 64: ring0 run
 [OK]    task 66: ring0 ready
-[INFO]  ticks=45 armed=false
+[INFO]  ticks=15 armed=false
 runix> sched timeslice
 [CMD]   sched timeslice
-[PASS]  time-sliced: A=2842725 B=2873428 preemptions=201; cooperative could not run B
+[PASS]  time-sliced: A=2969467 B=3001281 preemptions=201; cooperative could not run B
 runix> sched preempt-race
 [CMD]   sched preempt-race
 [VULN]  validated id=5; revoker ran mid-window; cap GONE at use
@@ -91,9 +92,9 @@ runix> fault spawn
   Error code: 0x0
   Registers:
     RAX=0x0000000012345678 RBX=0x0000000000000000 RCX=0x0000000000000007 RDX=0x3333333333333333
-    RSI=0x0000000000000008 RDI=0x0000000012345678 RBP=0x0000000000000000 RSP=0xffffffff80318270
-    R8 =0x0000000000000000 R9 =0x0000000000000000 R10=0xffffffff80027a3b R11=0xffffffff802c81b8
-    R12=0x0000000000000000 R13=0x0000000000000000 R14=0x0000000000000000 R15=0xffffffff80014a20
+    RSI=0x0000000000000008 RDI=0x0000000012345678 RBP=0x0000000000000000 RSP=0xffffffff8031b270
+    R8 =0x0000000000000000 R9 =0x0000000000000000 R10=0xffffffff8002a543 R11=0xffffffff802cb1b8
+    R12=0x0000000000000000 R13=0x0000000000000000 R14=0x0000000000000000 R15=0xffffffff80014a80
     CS =0x0008 SS =0x0010 RFLAGS=0x0000000000010282
 [OK]    task 71 faulted (#PF) and was contained; kernel + 1 tasks alive
 runix> fault cascade 3
@@ -103,27 +104,27 @@ runix> fault cascade 3
   Error code: 0x0
   Registers:
     RAX=0x0000000012345678 RBX=0x0000000000000000 RCX=0x0000000000000007 RDX=0x3333333333333333
-    RSI=0x0000000000000008 RDI=0x0000000012345678 RBP=0x0000000000000000 RSP=0xffffffff80320270
-    R8 =0x0000000000000000 R9 =0x0000000000000000 R10=0xffffffff80027a3b R11=0xffffffff802c81b8
-    R12=0x0000000000000000 R13=0x0000000000000000 R14=0x0000000000000000 R15=0xffffffff80014a20
+    RSI=0x0000000000000008 RDI=0x0000000012345678 RBP=0x0000000000000000 RSP=0xffffffff80323270
+    R8 =0x0000000000000000 R9 =0x0000000000000000 R10=0xffffffff8002a543 R11=0xffffffff802cb1b8
+    R12=0x0000000000000000 R13=0x0000000000000000 R14=0x0000000000000000 R15=0xffffffff80014a80
     CS =0x0008 SS =0x0010 RFLAGS=0x0000000000010282
 [FAULT] page fault (#PF) in task 73 at rip=0xffffffff800065ac -> terminating task, kernel continues.
   Faulting address: 0x12345678
   Error code: 0x0
   Registers:
     RAX=0x0000000012345678 RBX=0x0000000000000000 RCX=0x0000000000000007 RDX=0x3333333333333333
-    RSI=0x0000000000000008 RDI=0x0000000012345678 RBP=0x0000000000000000 RSP=0xffffffff80328270
-    R8 =0xffffffff80023940 R9 =0x0000000000000007 R10=0x0000000000000002 R11=0xffffffff802c81b8
-    R12=0x0000000000000000 R13=0x0000000000000000 R14=0x0000000000000000 R15=0xffffffff80014a20
+    RSI=0x0000000000000008 RDI=0x0000000012345678 RBP=0x0000000000000000 RSP=0xffffffff8032b270
+    R8 =0xffffffff80025a58 R9 =0x0000000000000007 R10=0x0000000000000002 R11=0xffffffff802cb1b8
+    R12=0x0000000000000000 R13=0x0000000000000000 R14=0x0000000000000000 R15=0xffffffff80014a80
     CS =0x0008 SS =0x0010 RFLAGS=0x0000000000010282
 [FAULT] page fault (#PF) in task 74 at rip=0xffffffff800065ac -> terminating task, kernel continues.
   Faulting address: 0x12345678
   Error code: 0x0
   Registers:
     RAX=0x0000000012345678 RBX=0x0000000000000000 RCX=0x0000000000000007 RDX=0x3333333333333333
-    RSI=0x0000000000000008 RDI=0x0000000012345678 RBP=0x0000000000000000 RSP=0xffffffff80330270
-    R8 =0xffffffff80023940 R9 =0x0000000000000007 R10=0x0000000000000002 R11=0xffffffff802c81b8
-    R12=0x0000000000000000 R13=0x0000000000000000 R14=0x0000000000000000 R15=0xffffffff80014a20
+    RSI=0x0000000000000008 RDI=0x0000000012345678 RBP=0x0000000000000000 RSP=0xffffffff80333270
+    R8 =0xffffffff80025a58 R9 =0x0000000000000007 R10=0x0000000000000002 R11=0xffffffff802cb1b8
+    R12=0x0000000000000000 R13=0x0000000000000000 R14=0x0000000000000000 R15=0xffffffff80014a80
     CS =0x0008 SS =0x0010 RFLAGS=0x0000000000010282
 [OK]    task 72 contained
 [OK]    task 73 contained
@@ -143,7 +144,7 @@ runix> ipc typed 1 hi
 [INFO]  echo tag=0 'hi'
 runix> ipc stress 2
 [CMD]   ipc stress 2
-[PASS]  stress: 194342 msgs in 3s = 64780/s, dropped=0
+[PASS]  stress: 190034 msgs in 3s = 63344/s, dropped=0
 runix> service list
 [CMD]   service list
 [OK]    service echo (task 65): recv, caps=1, queue=0
@@ -182,4 +183,32 @@ runix> migrate 1 1
 [dist] Part 8: simulating node 1 failure -> failover re-bind ...
 [dist] PASS: failover re-bound service #1 to local replica (task 76, 2 cap(s)); capability still valid.
 [PASS]  service 1 migrated node0->node1, capability stable
+runix> \
+[CMD]   \
+[FAIL]  unknown command: \
+[INFO]  try: help
+runix> help cap list
+[CMD]   help cap list
+[INFO]  cap list - List all capabilities currently held by the shell task.
+runix> help sched info
+[CMD]   help sched info
+[INFO]  sched info - List all system tasks, their privilege levels (ring 0/3), and states.
+runix> help fault cascade
+[CMD]   help fault cascade
+[INFO]  fault cascade <n> - Spawn n faulting tasks in parallel (1-8) to test fault containment.
+runix> help ipc stress
+[CMD]   help ipc stress
+[INFO]  ipc stress <n> - Spawn n worker pairs (1-8) ping-ponging messages for 3 seconds.
+runix> help service restart
+[CMD]   help service restart
+[INFO]  service restart <name> - Restart the named service (v1: echo).
+runix> help checkpoint
+[CMD]   help checkpoint
+[INFO]  checkpoint - Capture an in-memory snapshot of all active task capability states.
+runix> help restore
+[CMD]   help restore
+[INFO]  restore <id> - Restore task states from in-memory snapshot slot (v1: 0).
+runix> help migrate
+[CMD]   help migrate
+[INFO]  migrate <service> <node> - Demonstrate network-transparent IPC, migration, and replica failover.
 runix> 

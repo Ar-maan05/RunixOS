@@ -2,8 +2,8 @@
 
 RunixOS is an experimental, memory-safe, x86_64 **capability-based microkernel** written in
 Rust. The kernel is deliberately minimal: it provides memory management, scheduling, IPC, and
-a capability system, and nothing else. All OS abstractions — drivers, filesystem, logging,
-init — belong in user space.
+a capability system, and nothing else. All OS abstractions -- drivers, filesystem, logging,
+init -- belong in user space.
 
 See [`../../OS_PLAN.md`](../../OS_PLAN.md) for the full phase-by-phase directive.
 
@@ -86,19 +86,19 @@ The kernel contains only the following subsystems. Everything else is deferred t
 
 ### 4.1 Capability System (`process/capability.rs`)
 
-Capabilities are the central security primitive — opaque, unforgeable, kernel-issued tokens
+Capabilities are the central security primitive -- opaque, unforgeable, kernel-issued tokens
 that bind a holder to a specific resource and a set of rights.
 
-- `Resource` — what a capability refers to: `Serial`, `IpcChannel { target_task }`,
+- `Resource` -- what a capability refers to: `Serial`, `IpcChannel { target_task }`,
   `MemoryMapping { start_vaddr, size, writeable }`.
-- `Capability` — a `Resource` plus `read` / `write` / `grant` rights.
-- `CapTable` — a fixed-size, per-process table of capability slots (no dynamic allocation in
+- `Capability` -- a `Resource` plus `read` / `write` / `grant` rights.
+- `CapTable` -- a fixed-size, per-process table of capability slots (no dynamic allocation in
   Phase 1). Operations: `insert`, `get`, `remove` (revoke).
 
 Rules enforced:
 
 - All kernel APIs validate a capability before acting.
-- No ambient authority — a task can only act through capabilities it holds.
+- No ambient authority -- a task can only act through capabilities it holds.
 - Capabilities are referenced by slot index within the holder's own table; a task cannot
   forge or reach another task's slots.
 
@@ -106,11 +106,11 @@ Rules enforced:
 
 Message passing is the only communication mechanism. Phase 1 uses **blocking rendezvous** IPC.
 
-- `sys_send(cap_idx, payload)` — resolves the target task from an `IpcChannel` capability,
+- `sys_send(cap_idx, payload)` -- resolves the target task from an `IpcChannel` capability,
   then either delivers immediately (if the target is blocked on receive) or blocks the sender
   until the target receives.
-- `sys_receive()` — delivers a waiting sender's message, or blocks until one arrives.
-- `Message` — `{ sender: TaskId, payload: [u8; 128], len }`. Fixed-size payload; no shared
+- `sys_receive()` -- delivers a waiting sender's message, or blocks until one arrives.
+- `Message` -- `{ sender: TaskId, payload: [u8; 128], len }`. Fixed-size payload; no shared
   buffers.
 
 There is no shared memory: the message is copied between task buffers under the scheduler
@@ -172,15 +172,15 @@ capability.
 | `process/mod.rs` | Task, IPC-buffer, re-exports | active |
 | `scheduler/` | Cooperative round-robin scheduler; CR3 + rsp0 switch | active |
 | `syscall/` | `KernelRequest` typed dispatch; `SYS_CAP_GRANT`, `SYS_SEND_TYPED` | active |
-| `drivers/` | Boot-essential drivers only — COM1 serial | active |
+| `drivers/` | Boot-essential drivers only -- COM1 serial | active |
 | `arch/x86_64/` | GDT + TSS (kernel/user segments, rsp0) | active |
 | `interrupts/` | IDT + CPU-exception handlers (fault containment) | active |
 | `userspace/` | Ring-3 program setup (address space + program load) | active |
-| `fs/` | Filesystem — **belongs in user space** (Phase 6) | reserved |
+| `fs/` | Filesystem -- **belongs in user space** (Phase 6) | reserved |
 | `tests/` | Kernel integration tests | stub |
 
 The `fs/` directory exists only as a reserved namespace. Per the directive, the kernel must
-**not** implement filesystem, driver, or service logic — these are user-space processes
+**not** implement filesystem, driver, or service logic -- these are user-space processes
 reached over IPC.
 
 ---
@@ -197,7 +197,7 @@ holder.
 - **Per-process address spaces.** `memory::new_address_space` allocates a fresh PML4 and copies
   the kernel's higher half (entries 256..512) so the kernel stays mapped; the lower half holds
   the process's private user pages. The scheduler loads each task's `cr3` on switch, giving
-  true isolation — two user tasks can use identical virtual addresses without collision.
+  true isolation -- two user tasks can use identical virtual addresses without collision.
 - **Ring-3 entry.** `Task::new_user` primes a kernel stack with a CPU interrupt frame; the first
   context switch returns into the `iret_to_user` trampoline, whose `iretq` drops to ring 3.
 - **IPC-based syscalls.** There is no Unix syscall model. The `int 0x80` trap (a DPL-3 IDT gate)
@@ -222,14 +222,14 @@ The current boot wires up two tasks to exercise the primitives end to end:
 
 1. **Task 1 (sender)** holds an `IpcChannel` capability targeting Task 2. It sends
    `"Sensor data: Temp=24.5C"` each iteration. It also *attempts* a serial write through a
-   capability slot it does not own — which the kernel rejects, demonstrating capability
+   capability slot it does not own -- which the kernel rejects, demonstrating capability
    gating.
 2. **Task 2 (logging service)** holds a `Serial` capability. It receives the IPC message and
    prints it through its serial capability.
 
 3. **Task 3 (buggy)** holds no capabilities and deliberately performs an illegal memory
    access. The IDT exception handler catches the fault, terminates only Task 3, and
-   reschedules — Tasks 1 and 2 continue uninterrupted. This demonstrates fault containment.
+   reschedules -- Tasks 1 and 2 continue uninterrupted. This demonstrates fault containment.
 
 This satisfies the Phase 1 success criteria: the kernel boots, multiple tasks run, IPC passes
 between them, capability gating blocks unauthorized access, and a process fault does not crash
@@ -241,22 +241,22 @@ Phase 3 hardens the capability model and IPC without adding new kernel primitive
 
 ### 9.1 Capability sealing (`process/capability.rs`)
 
-- `Capability::sealed` — when set, `CapTable::remove()` returns `Err(())`; the holder
+- `Capability::sealed` -- when set, `CapTable::remove()` returns `Err(())`; the holder
   cannot discard a mandatory authority the kernel placed. `CapTable::kernel_revoke` is the
   privileged path that bypasses the seal.
-- `CapTable::insert_sealed` — inserts a capability and immediately sets `sealed = true`.
+- `CapTable::insert_sealed` -- inserts a capability and immediately sets `sealed = true`.
   Used by the kernel when constructing a task's initial capability set.
 
 ### 9.2 Rights attenuation (`process/capability.rs`)
 
-- `Capability::attenuate(RightsMask)` — returns a derived capability whose rights are the
+- `Capability::attenuate(RightsMask)` -- returns a derived capability whose rights are the
   *intersection* of the donor's rights and the requested mask. Fails with `Err(())` if the
   donor lacks the `grant` flag. Derived caps are never sealed (the kernel seals at
   task-creation time).
 
 ### 9.3 Structured IPC (`process/ipc.rs`)
 
-- `IpcTag` enum (`Raw`, `Log`, `Sensor`, `Ping`) — a kernel-visible discriminant on every
+- `IpcTag` enum (`Raw`, `Log`, `Sensor`, `Ping`) -- a kernel-visible discriminant on every
   message. `IpcTag::from_u16` rejects unknown variants.
 - `Message` gains `tag: IpcTag` and `version: u16`; the raw payload remains `[u8; 128]`.
 - `IpcError` enum replaces `()` so callers can distinguish `NoCapability` / `TargetGone` /
@@ -266,22 +266,22 @@ Phase 3 hardens the capability model and IPC without adding new kernel primitive
 
 ### 9.4 Kernel dispatch layer (`syscall/mod.rs`)
 
-- `KernelRequest` — an enum built from the raw `SyscallFrame` by `parse_request`. The
+- `KernelRequest` -- an enum built from the raw `SyscallFrame` by `parse_request`. The
   `syscall_dispatch` match arm for each variant receives already-typed inputs (no ad-hoc
   `if len <= 128 && !ptr.is_null()` checks scattered through the dispatcher).
-- `SYS_CAP_GRANT` (5) — `dispatch_cap_grant` atomically: (1) resolves the donor cap and
+- `SYS_CAP_GRANT` (5) -- `dispatch_cap_grant` atomically: (1) resolves the donor cap and
   calls `attenuate`, (2) inserts the derived cap into the target task's table. Rights
   attenuation and the grant-flag check happen in the same kernel lock section.
-- `SYS_SEND_TYPED` (6) — calls `sys_send_typed`; the kernel rejects unknown tags and the
+- `SYS_SEND_TYPED` (6) -- calls `sys_send_typed`; the kernel rejects unknown tags and the
   reserved version sentinel `0xFFFF` before forwarding.
 
 ### 9.5 Phase 4: Isolation & Safety Hardening
 
 Phase 4 hardens the microkernel boundaries and enforces safety guarantees:
 
-- **Strict memory isolation (`memory/mod.rs`)** — The `validate_user_range(ptr, len, writeable)` function traverses all four levels of the active PML4 page tables. It ensures that every page in a user-supplied buffer is mapped, resides in user space (U/S bit set), and has correct read/write permissions.
-- **Fault containment (`interrupts/mod.rs`)** — Custom assembly entries (`divide_error_entry`, `invalid_opcode_entry`, `general_protection_entry`, `page_fault_entry`) intercept CPU exceptions. They save the entire task register context (general-purpose + CPU interrupt frame registers) into `ExceptionFrame`, print it for debugging, save it to the terminated task's metadata, and hand control back to the scheduler.
-- **`SYS_CAP_REVOKE` (7)** — Gated capability revocation API. Allows a task to revoke a capability from a target task's table, bypassing any sealing checks. The caller must hold a capability to the target task with `grant = true`.
+- **Strict memory isolation (`memory/mod.rs`)** -- The `validate_user_range(ptr, len, writeable)` function traverses all four levels of the active PML4 page tables. It ensures that every page in a user-supplied buffer is mapped, resides in user space (U/S bit set), and has correct read/write permissions.
+- **Fault containment (`interrupts/mod.rs`)** -- Custom assembly entries (`divide_error_entry`, `invalid_opcode_entry`, `general_protection_entry`, `page_fault_entry`) intercept CPU exceptions. They save the entire task register context (general-purpose + CPU interrupt frame registers) into `ExceptionFrame`, print it for debugging, save it to the terminated task's metadata, and hand control back to the scheduler.
+- **`SYS_CAP_REVOKE` (7)** -- Gated capability revocation API. Allows a task to revoke a capability from a target task's table, bypassing any sealing checks. The caller must hold a capability to the target task with `grant = true`.
 
 **Next:** Phase 5 introduces async/non-blocking IPC, message queues, and a kernel dispatch queue to scale system communication to larger numbers of tasks.
 
@@ -320,7 +320,7 @@ the criteria at runtime:
 - 16 `task_worker`s churn the scheduler and exit cleanly (scale / stability).
 
 A normal boot shows the crasher contained, the probe reporting `TargetGone`, all
-workers exiting cleanly, and **zero kernel panics** — satisfying the Phase 7
+workers exiting cleanly, and **zero kernel panics** -- satisfying the Phase 7
 success criteria.
 
 ## 11. Phase 8: Security & Capability Maturity
@@ -333,7 +333,7 @@ transitive revocation.
 The kernel keeps an append-only, fixed-capacity ring buffer (`AUDIT_LOG`) of
 every capability lifecycle event: `Grant`, `Revoke`, and `RevokePropagated`.
 Each `AuditEvent` records the actor (granter/revoker, or `kernel`), the target
-task, the resource, and the slot. It is **kernel-only** — no syscall exposes it
+task, the resource, and the slot. It is **kernel-only** -- no syscall exposes it
 to ring 3. Under sustained churn the ring overwrites the oldest entries and
 counts how many were `dropped`, so it never allocates or grows unbounded.
 
@@ -360,14 +360,14 @@ or reach another task's slots.
 
 A boot-time kernel task builds a three-level chain `A → B → C` (each link a
 derived capability), revokes A's root capability, and verifies B and C both lose
-their derived capabilities — then dumps the audit trail, which shows the four
+their derived capabilities -- then dumps the audit trail, which shows the four
 real init grants plus the demo's grant/revoke/propagation events. This satisfies
 the Phase 8 success criteria: the capability system is fully enforced, no ambient
 authority exists, all access is capability-gated, and the audit trail is complete.
 
 > **Lineage robustness note.** Capability lineage uses a globally-unique,
 > never-recycled capability `id` (assigned by `CapTable::insert`), not
-> `(task, slot)` — so revocation propagation cannot mis-target a derived
+> `(task, slot)` -- so revocation propagation cannot mis-target a derived
 > capability after a slot index is reused. Propagation is a fixpoint over the
 > capability tables keyed by id, complete regardless of derivation fan-out.
 
@@ -381,7 +381,7 @@ boots deterministically.
 A kernel `task_watchdog` monitors a service task. When the service faults, the
 IDT handler contains it and leaves it `Terminated`; the watchdog detects this,
 restarts the service in the same slot with a **freshly granted capability set**
-(capability redistribution on failure — the dead incarnation's authority is
+(capability redistribution on failure -- the dead incarnation's authority is
 never inherited), and bounds restarts at `MAX_RESTARTS` so an unrecoverable
 service cannot loop forever. Once a stable incarnation is observed running, the
 watchdog declares recovery and exits.
@@ -392,8 +392,8 @@ stably on the third; a normal boot shows: crash → restart #1 → crash → res
 
 ### 12.2 Deterministic boot
 
-The boot path initializes in a fixed order — serial, frame allocator, GDT/TSS,
-IDT, then `init` plus the Phase 7/8/9 harnesses — with no hidden initialization
+The boot path initializes in a fixed order -- serial, frame allocator, GDT/TSS,
+IDT, then `init` plus the Phase 7/8/9 harnesses -- with no hidden initialization
 paths. High-frequency diagnostics are gated behind the compile-time
 [`DEBUG`](#) switch (see §Phase 6), so the boot log is identical run to run.
 
@@ -401,10 +401,10 @@ paths. High-frequency diagnostics are gated behind the compile-time
 
 Across all harnesses a normal boot contains three deliberate faults (one crasher,
 two service crashes) and reports `TargetGone` for the dead-target probe, with
-**zero kernel panics** — the kernel stays minimal and stable under every induced
+**zero kernel panics** -- the kernel stays minimal and stable under every induced
 failure, satisfying the Phase 9 success criteria.
 
-## 13. Phase 10 (Parts 1–3): Persistence — Checkpoint & Restore
+## 13. Phase 10 (Parts 1–3): Persistence -- Checkpoint & Restore
 
 Phase 10 is the "final boss": distributed, persistent RunixOS. This build
 implements the **single-node, in-memory** core of it and is explicit about the
@@ -412,21 +412,21 @@ boundary.
 
 ### 13.1 What is implemented (`process/snapshot.rs`)
 
-- **Part 1 — persistent system state.** `capture()` serializes every task's
-  checkpointable state — capability table, pending IPC (rendezvous buffer +
-  async queue), and metadata (id, state) — plus the scheduler's current task,
+- **Part 1 -- persistent system state.** `capture()` serializes every task's
+  checkpointable state -- capability table, pending IPC (rendezvous buffer +
+  async queue), and metadata (id, state) -- plus the scheduler's current task,
   into a single fixed-size `SystemSnapshot` ("save-system-state"). `restore()`
   writes it back ("restore-system-state").
-- **Part 2 — process checkpointing.** The per-task projection (`TaskCheckpoint`)
+- **Part 2 -- process checkpointing.** The per-task projection (`TaskCheckpoint`)
   is exactly a checkpoint of a process's capability/IPC/metadata state.
-- **Part 3 — persistent capabilities.** Capabilities are POD carrying their
+- **Part 3 -- persistent capabilities.** Capabilities are POD carrying their
   globally-unique `id` and `origin` lineage, so the whole capability *graph*
   round-trips byte-for-byte. An FNV-1a integrity checksum over the graph
   (computed field-by-field, padding-free) stands in for the spec's "optional
   signing"; `restore()` refuses a snapshot whose checksum does not verify.
 
 `restore()` deliberately preserves each live task's execution context
-(`rsp`/`cr3`/`kstack_top`) and rolls back only the serialized metadata — the
+(`rsp`/`cr3`/`kstack_top`) and rolls back only the serialized metadata -- the
 "functionally equivalent" state the spec asks for, without corrupting the stacks
 of tasks that are still running.
 
@@ -453,7 +453,7 @@ These are the natural next increments toward the full Phase 10 thesis.
 ## 14. Phase 10 (Parts 4–8): Distribution Substrate
 
 Parts 4–8 add network-transparent IPC, distributed capabilities, service
-migration, persistent migration, and failover — at the **architecture** level.
+migration, persistent migration, and failover -- at the **architecture** level.
 
 > **Honest boundary.** There is no physical NIC in this build. A "remote node"
 > is a logical domain inside the same kernel image and the `Transport` is an
@@ -461,14 +461,14 @@ migration, persistent migration, and failover — at the **architecture** level.
 > a message + hand it to a node) so a real virtio-net/e1000 backend could later
 > implement it **without changing** the routing, capability, or migration logic
 > above it. What is demonstrated is the routing/migration machinery and the
-> programming-model invariance — not wire I/O.
+> programming-model invariance -- not wire I/O.
 
 ### 14.1 Location-transparent routing (`process/dist.rs`)
 
 A `ServiceRegistry` maps `ServiceId → Location` (`Local(TaskId)` or
 `Remote(NodeId)`). `route_send(cap, payload)` resolves the capability's service
 id to its current location and delivers either to the local task's queue or, via
-the transport, to the hosting node — the caller never branches on location
+the transport, to the hosting node -- the caller never branches on location
 (**Part 4**).
 
 ### 14.2 Distributed capabilities (**Part 5**)
@@ -481,7 +481,7 @@ machine. Its location can change under migration while the capability (and its
 
 `migrate(svc, dest)` checkpoints the local task (reusing the Phase 10 Part 1–3
 `TaskCheckpoint`), transfers that serialized state to the destination node,
-restores it there, and atomically re-points the route to `Remote(dest)` — then
+restores it there, and atomically re-points the route to `Remote(dest)` -- then
 tears down the local instance. The client's capability is untouched, and the
 service's capabilities ride along (state preserved).
 
@@ -489,7 +489,7 @@ service's capabilities ride along (state preserved).
 
 `failover(svc, replica)` recovers the last checkpoint held on a failed node,
 restores it onto a local replica task, and re-binds the route to `Local(replica)`
-— so capability holders keep working after a node loss.
+-- so capability holders keep working after a node loss.
 
 ### 14.5 Demonstration (`dist::demo`)
 
