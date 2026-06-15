@@ -121,6 +121,15 @@ runix> sched preempt-race
 | `restore <id>` | Restore from snapshot `<id>` (v1: only `0`); verify the checksum. In-memory only -- not durable across reboot. | `snapshot::restore` |
 | `migrate <service> <node>` | Migrate a service to a simulated remote node (v1: `migrate 1 1`); print the full transparent-IPC migration and failover handshake. | `dist::demo` / `dist::migrate` |
 
+### Observability and Usability -- Group F
+
+| Command | Description | Real path |
+|---|---|---|
+| `history [<n>]` | Show command history or re-run command at index n. Supports scrollable history using Up and Down arrow keys in the console. | Local shell ring buffer |
+| `trace <command>` | Run any command with detailed kernel path tracing (scheduler switches, capability inserts/lookups/revocations, CPU exceptions, and IPC Rendezvous) and print a structured call trace. | `log_trace` hooks in kernel paths |
+| `perf` | Print live kernel performance and health statistics: ticks, preemptions, deferred ticks, IPC messages delivered, faults caught, and tasks spawned/terminated. | `preempt::stats` + global atomic counters |
+| `watch <command> <interval>` | Re-run any command every `<interval>` ticks and print a line-by-line diff of the output. Press any key to exit. | `REDIRECT_TARGET` serial hook |
+
 ### Meta
 
 | Command | Description |
@@ -141,6 +150,7 @@ runix> sched preempt-race
 | `fault spawn / cascade` | Phase 4 -- fault containment and isolation under concurrent failure |
 | `service list / restart` | Phase 6, 9 -- userspace ecosystem and service recovery |
 | `checkpoint / restore / migrate` | Phase 10 -- persistent system state and transparent migration |
+| `history / trace / perf / watch` | Observability & usability -- system health, event tracing, line diffing, scrollable history |
 
 ---
 
@@ -171,4 +181,4 @@ These have no real kernel path and are intentionally **not** faked:
 - Durable cross-reboot `restore` (the snapshot is in-memory for one boot).
 - `migrate` to a physical second machine (the remote node is simulated in-kernel).
 - `ipc send` to arbitrary tasks (only the echo service, task 65).
-- Command history / arrow keys (backspace editing only).
+- Line editing features like cursor movements or tab-completion (history scrolling and backspace are supported).

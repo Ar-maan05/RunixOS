@@ -2,7 +2,7 @@ use crate::process::{self, Task, TaskId, CapTable, Capability, TaskState};
 use crate::process::capability::{Resource, RightsMask, MAX_CAPS};
 use crate::scheduler;
 use crate::preempt;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering, AtomicBool, AtomicUsize};
 
 macro_rules! print_cmd {
     ($($arg:tt)*) => {
@@ -95,7 +95,7 @@ pub extern "C" fn shell_main() -> ! {
     let mut line_buf = [0u8; 128];
     loop {
         crate::print!("runix> ");
-        let n = crate::drivers::serial::read_line(&mut line_buf);
+        let n = read_line_with_history(&mut line_buf);
         if n == 0 {
             continue;
         }
@@ -103,6 +103,8 @@ pub extern "C" fn shell_main() -> ! {
         if let Ok(s) = core::str::from_utf8(&line_buf[..n]) {
             print_cmd!("{}", s);
         }
+
+        HISTORY.lock().push(&line_buf[..n]);
 
         if let Err(_) = dispatch(&line_buf[..n]) {
             print_fail!("unrecoverable internal error");
@@ -164,6 +166,7 @@ fn dispatch(line: &[u8]) -> Result<(), ()> {
                 print_info!("Group C: fault spawn, fault cascade <n>");
                 print_info!("Group D: ipc send <task_id> <message>, ipc typed <schema> <payload>, ipc stress <n>, service list, service restart <name>");
                 print_info!("Group E: checkpoint, restore <id>, migrate <service> <node>");
+                print_info!("Group F: history [<n>], trace <command>, perf, watch <command> <interval>");
                 print_info!("Type 'help <command> [<subcommand>]' for details on a specific command.");
             } else {
                 match tok1 {
@@ -283,6 +286,18 @@ fn dispatch(line: &[u8]) -> Result<(), ()> {
                     }
                     b"migrate" => {
                         print_info!("migrate <service> <node> - Demonstrate network-transparent IPC, migration, and replica failover.");
+                    }
+                    b"history" => {
+                        print_info!("history [<n>] - Show command history or re-run command at index n.");
+                    }
+                    b"trace" => {
+                        print_info!("trace <command> - Run command with kernel path instrumentation and print call trace.");
+                    }
+                    b"perf" => {
+                        print_info!("perf - Print live kernel performance and health statistics.");
+                    }
+                    b"watch" => {
+                        print_info!("watch <command> <interval> - Re-run command every N ticks and diff the output.");
                     }
                     other => {
                         let s = core::str::from_utf8(other).unwrap_or("");
@@ -755,8 +770,14 @@ fn dispatch(line: &[u8]) -> Result<(), ()> {
             {
                 let mut sched = scheduler::SCHEDULER.lock();
                 for i in 0..n {
-                    sched.tasks[73 + 2 * i] = None;
-                    sched.tasks[74 + 2 * i] = None;
+                    if sched.tasks[73 + 2 * i].is_some() {
+                        sched.tasks[73 + 2 * i] = None;
+                        crate::process::TASKS_TERMINATED.fetch_add(1, Ordering::SeqCst);
+                    }
+                    if sched.tasks[74 + 2 * i].is_some() {
+                        sched.tasks[74 + 2 * i] = None;
+                        crate::process::TASKS_TERMINATED.fetch_add(1, Ordering::SeqCst);
+                    }
                 }
             }
 
@@ -815,7 +836,10 @@ fn dispatch(line: &[u8]) -> Result<(), ()> {
             print_info!("echo: shutdown");
             {
                 let mut sched = scheduler::SCHEDULER.lock();
-                sched.tasks[65] = None;
+                if sched.tasks[65].is_some() {
+                    sched.tasks[65] = None;
+                    crate::process::TASKS_TERMINATED.fetch_add(1, Ordering::SeqCst);
+                }
             }
 
             print_info!("echo: respawn (task 65)");
@@ -886,6 +910,133 @@ fn dispatch(line: &[u8]) -> Result<(), ()> {
             crate::process::dist::demo(1, TaskId(75), TaskId(76));
 
             print_pass!("service 1 migrated node0->node1, capability stable");
+        }
+        (b"history", _) => {
+            if tok1.is_empty() {
+                let hist = HISTORY.lock();
+                print_ok!("Command History:");
+                for i in 0..hist.count {
+                    let steps_back = hist.count - i;
+                    if let Some(cmd) = hist.get(steps_back) {
+                        let cmd_str = core::str::from_utf8(cmd).unwrap_or("");
+                        print_info!("  {}: {}", i, cmd_str);
+                    }
+                }
+            } else {
+                let n_idx = parse_usize(tok1)?;
+                let hist = HISTORY.lock();
+                if n_idx >= hist.count {
+                    print_fail!("history index {} out of range (0-{})", n_idx, hist.count.saturating_sub(1));
+                    return Ok(());
+                }
+                let steps_back = hist.count - n_idx;
+                if let Some(cmd) = hist.get(steps_back) {
+                    let mut cmd_buf = [0u8; 128];
+                    let cmd_len = cmd.len();
+                    cmd_buf[..cmd_len].copy_from_slice(cmd);
+                    drop(hist);
+                    
+                    let cmd_str = core::str::from_utf8(&cmd_buf[..cmd_len]).unwrap_or("");
+                    print_cmd!("{}", cmd_str);
+                    
+                    HISTORY.lock().push(&cmd_buf[..cmd_len]);
+                    return dispatch(&cmd_buf[..cmd_len]);
+                }
+            }
+        }
+        (b"trace", _) => {
+            let mut idx = 5;
+            while idx < line.len() && line[idx] == b' ' {
+                idx += 1;
+            }
+            if idx >= line.len() {
+                print_fail!("trace: no command specified");
+                return Ok(());
+            }
+            let sub_line = &line[idx..];
+            
+            NEXT_IDX.store(0, Ordering::SeqCst);
+            TRACE_OVERFLOW.store(false, Ordering::SeqCst);
+            TRACING_ACTIVE.store(true, Ordering::SeqCst);
+            
+            let res = dispatch(sub_line);
+            
+            TRACING_ACTIVE.store(false, Ordering::SeqCst);
+            
+            print_trace_summary();
+            return res;
+        }
+        (b"perf", _) => {
+            let ticks = preempt::stats().ticks;
+            let preemptions = preempt::stats().preemptions;
+            let deferred = preempt::stats().deferred;
+            let ipc_delivered = crate::process::ipc::IPC_DELIVERIES.load(Ordering::Relaxed);
+            let faults = crate::interrupts::FAULTS_CAUGHT.load(Ordering::Relaxed);
+            let spawned = crate::process::TASKS_SPAWNED.load(Ordering::Relaxed);
+            let terminated = crate::process::TASKS_TERMINATED.load(Ordering::Relaxed);
+            
+            print_ok!("Kernel Performance & Health Stats:");
+            print_info!("  Ticks elapsed:       {}", ticks);
+            print_info!("  Preemptions:         {}", preemptions);
+            print_info!("  Deferred preempts:   {}", deferred);
+            print_info!("  IPC messages:        {}", ipc_delivered);
+            print_info!("  Faults caught:       {}", faults);
+            print_info!("  Tasks spawned:       {}", spawned);
+            print_info!("  Tasks terminated:    {}", terminated);
+        }
+        (b"watch", _) => {
+            let (sub_cmd, interval_tok) = if count == 4 {
+                let start = tokens[1].unwrap();
+                let end = tokens[2].unwrap();
+                let start_idx = (start.as_ptr() as usize).checked_sub(line.as_ptr() as usize).unwrap();
+                let end_idx = (end.as_ptr() as usize).checked_sub(line.as_ptr() as usize).unwrap() + end.len();
+                (&line[start_idx..end_idx], tokens[3].unwrap())
+            } else if count == 3 {
+                (tokens[1].unwrap(), tokens[2].unwrap())
+            } else {
+                print_fail!("Usage: watch <command> <interval>");
+                return Ok(());
+            };
+            
+            let interval = parse_usize(interval_tok)?;
+            
+            unsafe {
+                WATCH_LEN_PREV = 0;
+            }
+            
+            loop {
+                unsafe {
+                    WATCH_LEN_CUR = 0;
+                    *crate::drivers::serial::REDIRECT_TARGET.lock() = Some((
+                        WATCH_BUF_CUR.as_mut_ptr() as usize,
+                        1024,
+                        (&raw mut WATCH_LEN_CUR) as usize,
+                    ));
+                }
+                
+                let _ = dispatch(sub_cmd);
+                
+                *crate::drivers::serial::REDIRECT_TARGET.lock() = None;
+                
+                crate::print!("\x1b[2J\x1b[H");
+                crate::print!("[INFO]  watch: {} (every {} ticks, press any key to exit)\n", core::str::from_utf8(sub_cmd).unwrap_or(""), interval);
+                
+                print_diffed_buffers();
+                
+                unsafe {
+                    WATCH_BUF_PREV[..WATCH_LEN_CUR].copy_from_slice(&WATCH_BUF_CUR[..WATCH_LEN_CUR]);
+                    WATCH_LEN_PREV = WATCH_LEN_CUR;
+                }
+                
+                let wait_start = preempt::stats().ticks;
+                while preempt::stats().ticks.wrapping_sub(wait_start) < interval as u64 {
+                    if let Some(_) = crate::drivers::serial::SERIAL1.lock().try_read() {
+                        crate::print!("\n");
+                        return Ok(());
+                    }
+                    scheduler::yield_cpu();
+                }
+            }
         }
         _ => {
             if let Ok(s) = core::str::from_utf8(line) {
@@ -1012,6 +1163,267 @@ extern "C" fn stress_worker_entry() -> ! {
             }
             Err(_) => {
                 scheduler::yield_cpu();
+            }
+        }
+    }
+}
+
+// ── Observability and usability extensions ───────────────────────────────────
+
+pub struct History {
+    pub buffer: [[u8; 128]; 16],
+    pub lens: [usize; 16],
+    pub head: usize,
+    pub count: usize,
+}
+
+impl History {
+    pub const fn new() -> Self {
+        Self {
+            buffer: [[0u8; 128]; 16],
+            lens: [0; 16],
+            head: 0,
+            count: 0,
+        }
+    }
+
+    pub fn push(&mut self, cmd: &[u8]) {
+        if cmd.is_empty() { return; }
+        if self.count > 0 {
+            let last_idx = (self.head + 15) % 16;
+            let last_len = self.lens[last_idx];
+            if last_len == cmd.len() && &self.buffer[last_idx][..last_len] == cmd {
+                return;
+            }
+        }
+        let idx = self.head;
+        let to_copy = core::cmp::min(cmd.len(), 128);
+        self.buffer[idx][..to_copy].copy_from_slice(&cmd[..to_copy]);
+        self.lens[idx] = to_copy;
+        self.head = (idx + 1) % 16;
+        if self.count < 16 {
+            self.count += 1;
+        }
+    }
+
+    pub fn get(&self, steps_back: usize) -> Option<&[u8]> {
+        if steps_back == 0 || steps_back > self.count {
+            return None;
+        }
+        let idx = (self.head + 16 - steps_back) % 16;
+        let len = self.lens[idx];
+        Some(&self.buffer[idx][..len])
+    }
+}
+
+pub static HISTORY: crate::drivers::serial::Spinlock<History> = crate::drivers::serial::Spinlock::new(History::new());
+
+pub fn read_line_with_history(buf: &mut [u8]) -> usize {
+    let mut n = 0;
+    let mut history_temp_idx = 0;
+    let mut draft_buf = [0u8; 128];
+    let mut draft_len = 0;
+
+    loop {
+        let b = crate::drivers::serial::read_byte();
+        match b {
+            b'\n' | b'\r' => {
+                crate::print!("\r\n");
+                return n;
+            }
+            0x08 | 0x7F => {
+                if n > 0 {
+                    n -= 1;
+                    crate::print!("\x08 \x08");
+                }
+            }
+            0x1b => {
+                let next1 = crate::drivers::serial::read_byte();
+                if next1 == b'[' {
+                    let next2 = crate::drivers::serial::read_byte();
+                    if next2 == b'A' {
+                        let hist = HISTORY.lock();
+                        if hist.count > 0 && history_temp_idx < hist.count {
+                            if history_temp_idx == 0 {
+                                draft_buf[..n].copy_from_slice(&buf[..n]);
+                                draft_len = n;
+                            }
+                            history_temp_idx += 1;
+                            for _ in 0..n {
+                                crate::print!("\x08 \x08");
+                            }
+                            if let Some(cmd) = hist.get(history_temp_idx) {
+                                buf[..cmd.len()].copy_from_slice(cmd);
+                                n = cmd.len();
+                                for &c in &buf[..n] {
+                                    crate::print!("{}", c as char);
+                                }
+                            }
+                        }
+                    } else if next2 == b'B' {
+                        if history_temp_idx > 0 {
+                            history_temp_idx -= 1;
+                            for _ in 0..n {
+                                crate::print!("\x08 \x08");
+                            }
+                            if history_temp_idx == 0 {
+                                buf[..draft_len].copy_from_slice(&draft_buf[..draft_len]);
+                                n = draft_len;
+                            } else {
+                                let hist = HISTORY.lock();
+                                if let Some(cmd) = hist.get(history_temp_idx) {
+                                    buf[..cmd.len()].copy_from_slice(cmd);
+                                    n = cmd.len();
+                                }
+                            }
+                            for &c in &buf[..n] {
+                                crate::print!("{}", c as char);
+                            }
+                        }
+                    }
+                }
+            }
+            0x20..=0x7E => {
+                if n < buf.len() {
+                    buf[n] = b;
+                    n += 1;
+                    crate::print!("{}", b as char);
+                    history_temp_idx = 0;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+pub const TRACE_BUFFER_SIZE: usize = 128;
+pub static mut TRACE_BUFFER: [TraceEvent; TRACE_BUFFER_SIZE] = [TraceEvent { tick: 0, msg: "", param1: 0, param2: 0 }; TRACE_BUFFER_SIZE];
+pub static NEXT_IDX: AtomicUsize = AtomicUsize::new(0);
+pub static TRACING_ACTIVE: AtomicBool = AtomicBool::new(false);
+pub static TRACE_OVERFLOW: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Copy)]
+pub struct TraceEvent {
+    pub tick: u64,
+    pub msg: &'static str,
+    pub param1: u64,
+    pub param2: u64,
+}
+
+pub fn log_trace(msg: &'static str, param1: u64, param2: u64) {
+    if TRACING_ACTIVE.load(Ordering::Relaxed) {
+        let idx = NEXT_IDX.fetch_add(1, Ordering::SeqCst);
+        let target_idx = idx % TRACE_BUFFER_SIZE;
+        unsafe {
+            TRACE_BUFFER[target_idx] = TraceEvent {
+                tick: preempt::stats().ticks,
+                msg,
+                param1,
+                param2,
+            };
+        }
+    }
+}
+
+fn print_trace_summary() {
+    let total = NEXT_IDX.load(Ordering::SeqCst);
+    let count = core::cmp::min(total, TRACE_BUFFER_SIZE);
+    let start = if total > TRACE_BUFFER_SIZE { total % TRACE_BUFFER_SIZE } else { 0 };
+
+    print_ok!("trace: {} events captured", total);
+    for i in 0..count {
+        let idx = (start + i) % TRACE_BUFFER_SIZE;
+        let event = unsafe { TRACE_BUFFER[idx] };
+        match event.msg {
+            "sched_switch_yield" | "sched_switch_preempt" | "sched_switch_term" => {
+                let switch_type = if event.msg == "sched_switch_yield" {
+                    "yield"
+                } else if event.msg == "sched_switch_preempt" {
+                    "preempt"
+                } else {
+                    "term"
+                };
+                print_info!("  [{}] sched: switch ({}) task {} -> task {}", event.tick, switch_type, event.param1, event.param2);
+            }
+            "ipc_send" | "ipc_send_async" => {
+                let is_async = if event.msg == "ipc_send_async" { " (async)" } else { "" };
+                print_info!("  [{}] ipc: send{} cap_slot={}, tag={}", event.tick, is_async, event.param1, event.param2);
+            }
+            "ipc_receive" | "ipc_receive_async" => {
+                let is_async = if event.msg == "ipc_receive_async" { " (async)" } else { "" };
+                print_info!("  [{}] ipc: receive{} by task {}", event.tick, is_async, event.param1);
+            }
+            "cpu_exception" => {
+                print_info!("  [{}] fault: exception vector {} at rip={:#x}", event.tick, event.param1, event.param2);
+            }
+            "cap_insert" => {
+                print_info!("  [{}] cap: insert id={} at slot {}", event.tick, event.param1, event.param2);
+            }
+            "cap_lookup" => {
+                print_info!("  [{}] cap: lookup slot {}, cap id {}", event.tick, event.param1, event.param2);
+            }
+            "cap_revoke" => {
+                print_info!("  [{}] cap: revoke/remove slot {}, cap id {}", event.tick, event.param1, event.param2);
+            }
+            other => {
+                print_info!("  [{}] {}: param1={}, param2={}", event.tick, other, event.param1, event.param2);
+            }
+        }
+    }
+    if total > TRACE_BUFFER_SIZE {
+        print_warn!("  [trace ring buffer overflowed: oldest events overwritten]");
+    }
+}
+
+pub static mut WATCH_BUF_CUR: [u8; 1024] = [0; 1024];
+pub static mut WATCH_BUF_PREV: [u8; 1024] = [0; 1024];
+pub static mut WATCH_LEN_CUR: usize = 0;
+pub static mut WATCH_LEN_PREV: usize = 0;
+
+fn print_diffed_buffers() {
+    let cur = unsafe { &WATCH_BUF_CUR[..WATCH_LEN_CUR] };
+    let prev = unsafe { &WATCH_BUF_PREV[..WATCH_LEN_PREV] };
+    
+    let mut cur_pos = 0;
+    let mut prev_pos = 0;
+    
+    while cur_pos < cur.len() {
+        let mut cur_end = cur_pos;
+        while cur_end < cur.len() && cur[cur_end] != b'\n' {
+            cur_end += 1;
+        }
+        let cur_line = &cur[cur_pos..cur_end];
+        let has_lf = cur_end < cur.len();
+        cur_pos = cur_end + (if has_lf { 1 } else { 0 });
+        
+        let prev_line = if prev_pos < prev.len() {
+            let mut prev_end = prev_pos;
+            while prev_end < prev.len() && prev[prev_end] != b'\n' {
+                prev_end += 1;
+            }
+            let line = &prev[prev_pos..prev_end];
+            let p_has_lf = prev_end < prev.len();
+            prev_pos = prev_end + (if p_has_lf { 1 } else { 0 });
+            Some(line)
+        } else {
+            None
+        };
+        
+        let clean_cur = if cur_line.ends_with(b"\r") { &cur_line[..cur_line.len() - 1] } else { cur_line };
+        let clean_prev = prev_line.map(|l| if l.ends_with(b"\r") { &l[..l.len() - 1] } else { l });
+        
+        let is_different = match clean_prev {
+            Some(p) => clean_cur != p,
+            None => true,
+        };
+        
+        if is_different {
+            if let Ok(s) = core::str::from_utf8(clean_cur) {
+                crate::print!("\x1b[33m* {}\x1b[0m\n", s);
+            }
+        } else {
+            if let Ok(s) = core::str::from_utf8(clean_cur) {
+                crate::print!("  {}\n", s);
             }
         }
     }

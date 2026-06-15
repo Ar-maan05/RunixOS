@@ -130,6 +130,7 @@ impl CapTable {
         for (idx, slot) in self.slots.iter_mut().enumerate() {
             if slot.is_none() {
                 *slot = Some(cap);
+                crate::shell::log_trace("cap_insert", cap.id, idx as u64);
                 return Ok(idx);
             }
         }
@@ -146,6 +147,9 @@ impl CapTable {
     /// Retrieves a capability reference by index.
     pub fn get(&self, idx: usize) -> Option<&Capability> {
         if idx < MAX_CAPS {
+            if let Some(ref cap) = self.slots[idx] {
+                crate::shell::log_trace("cap_lookup", idx as u64, cap.id);
+            }
             self.slots[idx].as_ref()
         } else {
             None
@@ -164,6 +168,8 @@ impl CapTable {
             if cap.sealed {
                 return Err(()); // sealed: holder cannot remove
             }
+            let cap_id = cap.id;
+            crate::shell::log_trace("cap_revoke", idx as u64, cap_id);
         }
         Ok(self.slots[idx].take())
     }
@@ -172,6 +178,10 @@ impl CapTable {
     /// Only the kernel calls this (from fault handlers / Phase 4 revocation).
     pub fn kernel_revoke(&mut self, idx: usize) -> Option<Capability> {
         if idx < MAX_CAPS {
+            if let Some(ref cap) = self.slots[idx] {
+                let cap_id = cap.id;
+                crate::shell::log_trace("cap_revoke", idx as u64, cap_id);
+            }
             self.slots[idx].take()
         } else {
             None

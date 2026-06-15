@@ -9,6 +9,9 @@ pub use capability::{Capability, CapTable, Resource, RightsMask};
 pub use ipc::{IpcError, IpcTag, Message, MessageQueue, sys_send, sys_receive,
               sys_send_typed, sys_receive_typed, sys_send_async, sys_receive_async};
 
+pub static TASKS_SPAWNED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static TASKS_TERMINATED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// Unique identifier for each process/task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TaskId(pub usize);
@@ -134,6 +137,7 @@ extern "C" {
 impl Task {
     /// Creates a new Task structure and sets up its stack for context switching.
     pub fn new(id: TaskId, entry: extern "C" fn() -> !, cap_table: CapTable) -> Self {
+        TASKS_SPAWNED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let idx = id.0;
         assert!(idx < MAX_TASKS, "Task ID exceeds maximum supported tasks");
 
@@ -189,6 +193,7 @@ impl Task {
         cr3: usize,
         cap_table: CapTable,
     ) -> Self {
+        TASKS_SPAWNED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         use crate::arch::gdt::{USER_CODE, USER_DATA};
 
         let idx = id.0;

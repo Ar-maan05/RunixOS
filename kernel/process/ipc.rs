@@ -17,6 +17,8 @@ use crate::process::{TaskId, TaskState};
 use crate::process::capability::Resource;
 use crate::scheduler::SCHEDULER;
 
+pub static IPC_DELIVERIES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 // ── Structured message types ────────────────────────────────────────────────
 
 /// A discriminant that identifies the semantic type of an IPC message.
@@ -208,6 +210,7 @@ pub fn sys_send_typed(
         let sched = SCHEDULER.lock();
         sched.current_task_id.ok_or(IpcError::NoContext)?
     };
+    crate::shell::log_trace("ipc_send", cap_idx as u64, tag as u64);
 
     let mut msg_payload = [0u8; 128];
     msg_payload[..payload.len()].copy_from_slice(payload);
@@ -272,6 +275,7 @@ pub fn sys_send_typed(
                                 target.ipc_buffer = Some(msg);
                                 target.state = TaskState::Ready;
                             }
+                            IPC_DELIVERIES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                             SendStep::Delivered
                         }
                         Some(_) => {
@@ -322,6 +326,7 @@ pub fn sys_receive_typed() -> Result<Message, IpcError> {
         let sched = SCHEDULER.lock();
         sched.current_task_id.ok_or(IpcError::NoContext)?
     };
+    crate::shell::log_trace("ipc_receive", current_task_id.0 as u64, 0);
 
     loop {
         let mut sched = SCHEDULER.lock();
@@ -357,6 +362,9 @@ pub fn sys_receive_typed() -> Result<Message, IpcError> {
             if let Some(receiver) = sched.get_task_mut(current_task_id) {
                 receiver.state = TaskState::Running;
             }
+            if msg.is_some() {
+                IPC_DELIVERIES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
             return msg.ok_or(IpcError::TargetGone);
         }
 
@@ -390,6 +398,7 @@ pub fn sys_send_async(
         let sched = SCHEDULER.lock();
         sched.current_task_id.ok_or(IpcError::NoContext)?
     };
+    crate::shell::log_trace("ipc_send_async", cap_idx as u64, tag as u64);
 
     let mut msg_payload = [0u8; 128];
     msg_payload[..payload.len()].copy_from_slice(payload);
@@ -417,6 +426,7 @@ pub fn sys_send_async(
                     if target.state == TaskState::BlockedOnReceive {
                         target.state = TaskState::Ready;
                     }
+                    IPC_DELIVERIES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     Ok(())
                 } else {
                     Err(IpcError::QueueFull)
@@ -438,6 +448,7 @@ pub fn sys_receive_async() -> Result<Message, IpcError> {
         let sched = SCHEDULER.lock();
         sched.current_task_id.ok_or(IpcError::NoContext)?
     };
+    crate::shell::log_trace("ipc_receive_async", current_task_id.0 as u64, 0);
 
     let mut sched = SCHEDULER.lock();
 
@@ -471,6 +482,9 @@ pub fn sys_receive_async() -> Result<Message, IpcError> {
         }
         if let Some(receiver) = sched.get_task_mut(current_task_id) {
             receiver.state = TaskState::Running;
+        }
+        if msg.is_some() {
+            IPC_DELIVERIES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         }
         return msg.ok_or(IpcError::TargetGone);
     }

@@ -76,6 +76,7 @@ pub fn terminate_current_task() -> ! {
             if idx < max_tasks {
                 if let Some(t) = sched.tasks[idx].as_mut() {
                     t.state = TaskState::Terminated;
+                    crate::process::TASKS_TERMINATED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 }
             }
         }
@@ -104,6 +105,7 @@ pub fn terminate_current_task() -> ! {
                     new_kstack_top = t.kstack_top;
                     new_cr3 = t.cr3;
                     sched.current_task_id = Some(t.id);
+                    crate::shell::log_trace("sched_switch_term", curr_idx.unwrap_or(0) as u64, idx as u64);
                     break;
                 }
             }
@@ -197,6 +199,7 @@ pub fn preempt_reschedule() {
         new_kstack_top = sched.tasks[next].as_ref().unwrap().kstack_top;
         new_cr3 = sched.tasks[next].as_ref().unwrap().cr3;
         sched.current_task_id = Some(sched.tasks[next].as_ref().unwrap().id);
+        crate::shell::log_trace("sched_switch_preempt", curr_idx as u64, next as u64);
     }
 
     if !old_rsp_ptr.is_null() && new_rsp_val != 0 {
@@ -283,6 +286,7 @@ pub fn yield_cpu() {
                     new_kstack_top = sched.tasks[next].as_ref().unwrap().kstack_top;
                     new_cr3 = sched.tasks[next].as_ref().unwrap().cr3;
                     sched.current_task_id = Some(sched.tasks[next].as_ref().unwrap().id);
+                    crate::shell::log_trace("sched_switch_yield", curr as u64, next as u64);
                 }
             } else {
                 // First-time scheduler boot: start running the target task

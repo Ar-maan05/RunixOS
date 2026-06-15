@@ -9,6 +9,8 @@
 use crate::println;
 use crate::scheduler;
 
+pub static FAULTS_CAUGHT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// The CPU state pushed by the processor when an exception/interrupt is taken.
 /// Layout matches the hardware interrupt stack frame for x86_64.
 #[repr(C)]
@@ -363,6 +365,8 @@ pub fn init_idt() {
 /// and terminate only the offending task (or halt if no task context).
 #[no_mangle]
 pub extern "C" fn exception_dispatch(frame: &ExceptionFrame, vector: u64) -> ! {
+    FAULTS_CAUGHT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    crate::shell::log_trace("cpu_exception", vector, frame.rip);
     let name = match vector {
         0  => "divide error (#DE)",
         6  => "invalid opcode (#UD)",

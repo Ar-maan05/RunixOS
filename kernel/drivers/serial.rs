@@ -221,6 +221,8 @@ unsafe fn outb(port: u16, value: u8) {
 // Global COM1 serial port writer.
 pub static SERIAL1: Spinlock<SerialPort> = Spinlock::new(SerialPort::new(0x3F8));
 
+pub static REDIRECT_TARGET: Spinlock<Option<(usize, usize, usize)>> = Spinlock::new(None);
+
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use fmt::Write;
@@ -229,10 +231,45 @@ pub fn _print(args: fmt::Arguments) {
     // task spinning on it; raising the preempt count makes the tick defer until
     // the lock is released, keeping serial output a clean critical section.
     crate::preempt::enter_critical();
-    {
+    
+    let mut redirected = false;
+    if let Some((buf_addr, max_len, len_addr)) = *REDIRECT_TARGET.lock() {
+        struct RedirectWriter {
+            buf: *mut u8,
+            max_len: usize,
+            written: *mut usize,
+        }
+        impl fmt::Write for RedirectWriter {
+            fn write_str(&mut self, s: &str) -> fmt::Result {
+                unsafe {
+                    let cur_len = *self.written;
+                    let bytes = s.as_bytes();
+                    let to_copy = core::cmp::min(bytes.len(), self.max_len - cur_len);
+                    if to_copy > 0 {
+                        core::ptr::copy_nonoverlapping(
+                            bytes.as_ptr(),
+                            self.buf.add(cur_len),
+                            to_copy,
+                        );
+                        *self.written = cur_len + to_copy;
+                    }
+                }
+                Ok(())
+            }
+        }
+        let mut writer = RedirectWriter {
+            buf: buf_addr as *mut u8,
+            max_len,
+            written: len_addr as *mut usize,
+        };
+        let _ = writer.write_fmt(args);
+        redirected = true;
+    }
+
+    if !redirected {
         // We lock the serial port to prevent interleaved output.
         let mut serial = SERIAL1.lock();
-        serial.write_fmt(args).unwrap();
+        let _ = serial.write_fmt(args);
     }
     crate::preempt::exit_critical();
 }
