@@ -39,6 +39,10 @@ pub enum Resource {
     /// capability. This is what makes a capability "identify a service rather
     /// than a physical machine location".
     Service { id: usize },
+    /// Gated access to a single Key-Value store slot.
+    KVEntry { slot: usize, readable: bool, writable: bool },
+    /// Scoped channel to publish or read a specific event kind.
+    LogChannel { kind: u8, readable: bool, writable: bool },
 }
 
 /// A capability represents a bundle of access rights to a resource.

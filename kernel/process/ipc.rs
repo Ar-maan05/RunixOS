@@ -38,6 +38,16 @@ pub enum IpcTag {
     Sensor  = 2,
     /// An explicit "no operation" heartbeat ping.
     Ping    = 3,
+    /// Capability-gated Key-Value Get.
+    KVGet   = 4,
+    /// Capability-gated Key-Value Set.
+    KVSet   = 5,
+    /// Event Log Publish.
+    LogPublish = 6,
+    /// Event Log Read.
+    LogRead    = 7,
+    /// Event Log Acknowledgment.
+    LogAck     = 8,
 }
 
 impl IpcTag {
@@ -49,6 +59,11 @@ impl IpcTag {
             1 => Some(IpcTag::Log),
             2 => Some(IpcTag::Sensor),
             3 => Some(IpcTag::Ping),
+            4 => Some(IpcTag::KVGet),
+            5 => Some(IpcTag::KVSet),
+            6 => Some(IpcTag::LogPublish),
+            7 => Some(IpcTag::LogRead),
+            8 => Some(IpcTag::LogAck),
             _ => None,
         }
     }

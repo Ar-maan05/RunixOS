@@ -76,6 +76,78 @@ pub fn root_caps() -> CapTable {
     let tmp = caps.slots[1];
     caps.slots[1] = caps.slots[2];
     caps.slots[2] = tmp;
+
+    // slot 3: KVEntry slot 0 (read/write)
+    let _ = caps.insert(Capability {
+        resource: Resource::KVEntry { slot: 0, readable: true, writable: true },
+        read: true,
+        write: true,
+        grant: true,
+        sealed: false,
+        id: 0,
+        origin: None,
+    });
+    // slot 4: KVEntry slot 1 (read-only)
+    let _ = caps.insert(Capability {
+        resource: Resource::KVEntry { slot: 1, readable: true, writable: false },
+        read: true,
+        write: false,
+        grant: true,
+        sealed: false,
+        id: 0,
+        origin: None,
+    });
+    // slot 5: KVEntry slot 2 (write-only)
+    let _ = caps.insert(Capability {
+        resource: Resource::KVEntry { slot: 2, readable: false, writable: true },
+        read: false,
+        write: true,
+        grant: true,
+        sealed: false,
+        id: 0,
+        origin: None,
+    });
+    // slot 6: IpcChannel to KV Service (task 82)
+    let _ = caps.insert(Capability {
+        resource: Resource::IpcChannel { target_task: TaskId(82) },
+        read: true,
+        write: true,
+        grant: true,
+        sealed: false,
+        id: 0,
+        origin: None,
+    });
+    // slot 7: LogChannel kind 0 (read/write)
+    let _ = caps.insert(Capability {
+        resource: Resource::LogChannel { kind: 0, readable: true, writable: true },
+        read: true,
+        write: true,
+        grant: true,
+        sealed: false,
+        id: 0,
+        origin: None,
+    });
+    // slot 8: LogChannel kind 1 (read-only)
+    let _ = caps.insert(Capability {
+        resource: Resource::LogChannel { kind: 1, readable: true, writable: false },
+        read: true,
+        write: false,
+        grant: true,
+        sealed: false,
+        id: 0,
+        origin: None,
+    });
+    // slot 9: IpcChannel to Log Service (task 83)
+    let _ = caps.insert(Capability {
+        resource: Resource::IpcChannel { target_task: TaskId(83) },
+        read: true,
+        write: true,
+        grant: true,
+        sealed: false,
+        id: 0,
+        origin: None,
+    });
+
     caps
 }
 
@@ -167,6 +239,8 @@ fn dispatch(line: &[u8]) -> Result<(), ()> {
                 print_info!("Group D: ipc send <task_id> <message>, ipc typed <schema> <payload>, ipc stress <n>, service list, service restart <name>");
                 print_info!("Group E: checkpoint, restore <id>, migrate <service> <node>");
                 print_info!("Group F: history [<n>], trace <command>, perf, watch <command> <interval>");
+                print_info!("Group G: kv set <slot> <key> <value>, kv get <slot> <key>, kv grant <slot> <task>, kv revoke <slot>");
+                print_info!("Group H: log publish <kind> <message>, log read <kind>, log grant <kind> <task> <r|w|rw>, log revoke <kind>, log tail");
                 print_info!("Type 'help <command> [<subcommand>]' for details on a specific command.");
             } else {
                 match tok1 {
@@ -299,6 +373,19 @@ fn dispatch(line: &[u8]) -> Result<(), ()> {
                     b"watch" => {
                         print_info!("watch <command> <interval> - Re-run command every N ticks and diff the output.");
                     }
+                    b"kv" => {
+                        print_info!("kv set <slot> <key> <value> - Write to KV slot using write capability.");
+                        print_info!("kv get <slot> <key> - Read from KV slot using read capability.");
+                        print_info!("kv grant <slot> <task> - Transfer read-only KV capability to task.");
+                        print_info!("kv revoke <slot> - Revoke shell's capability for KV slot.");
+                    }
+                    b"log" => {
+                        print_info!("log publish <kind> <message> - Publish an event to the log service.");
+                        print_info!("log read <kind> - Read next unread event of given kind from log service.");
+                        print_info!("log grant <kind> <task> <r|w|rw> - Transfer derived log channel capability to task.");
+                        print_info!("log revoke <kind> - Revoke shell's capability for event log kind.");
+                        print_info!("log tail - Continuously read and display all readable kinds every tick.");
+                    }
                     other => {
                         let s = core::str::from_utf8(other).unwrap_or("");
                         print_fail!("unknown command group: {}", s);
@@ -324,6 +411,12 @@ fn dispatch(line: &[u8]) -> Result<(), ()> {
                         }
                         Resource::MemoryMapping { .. } => {
                             print_ok!("slot {}: id={} Memory r={} w={} g={} sealed={} origin={:?}", i, cap.id, cap.read, cap.write, cap.grant, cap.sealed, cap.origin);
+                        }
+                        Resource::KVEntry { slot, readable, writable } => {
+                            print_ok!("slot {}: id={} KVEntry(slot {}) r={} w={} g={} sealed={} origin={:?}", i, cap.id, slot, readable, writable, cap.grant, cap.sealed, cap.origin);
+                        }
+                        Resource::LogChannel { kind, readable, writable } => {
+                            print_ok!("slot {}: id={} LogChannel(kind {}) r={} w={} g={} sealed={} origin={:?}", i, cap.id, kind, readable, writable, cap.grant, cap.sealed, cap.origin);
                         }
                     }
                 }
@@ -1029,12 +1122,604 @@ fn dispatch(line: &[u8]) -> Result<(), ()> {
                 }
                 
                 let wait_start = preempt::stats().ticks;
+                let mut last_wait_tick = wait_start;
                 while preempt::stats().ticks.wrapping_sub(wait_start) < interval as u64 {
-                    if let Some(_) = crate::drivers::serial::SERIAL1.lock().try_read() {
-                        crate::print!("\n");
-                        return Ok(());
+                    let current_tick = preempt::stats().ticks;
+                    if current_tick != last_wait_tick {
+                        last_wait_tick = current_tick;
+                        let key_opt = crate::drivers::serial::SERIAL1.lock().try_read();
+                        if key_opt.is_some() {
+                            crate::print!("\n");
+                            return Ok(());
+                        }
                     }
                     scheduler::yield_cpu();
+                }
+            }
+        }
+        (b"kv", _) => {
+            match tok1 {
+                b"set" => {
+                    let slot = parse_usize(tok2)?;
+                    if slot >= 32 {
+                        print_fail!("slot index {} out of range (0-31)", slot);
+                        return Ok(());
+                    }
+                    
+                    let rest = tok3;
+                    let mut split_idx = 0;
+                    while split_idx < rest.len() && rest[split_idx] != b' ' {
+                        split_idx += 1;
+                    }
+                    if split_idx >= rest.len() {
+                        print_fail!("Usage: kv set <slot> <key> <value>");
+                        return Ok(());
+                    }
+                    let key_bytes = &rest[..split_idx];
+                    let mut val_start = split_idx;
+                    while val_start < rest.len() && rest[val_start] == b' ' {
+                        val_start += 1;
+                    }
+                    if val_start >= rest.len() {
+                        print_fail!("Usage: kv set <slot> <key> <value>");
+                        return Ok(());
+                    }
+                    let val_bytes = &rest[val_start..];
+                    
+                    let mut payload = [0u8; 81];
+                    payload[0] = slot as u8;
+                    
+                    let key_len = core::cmp::min(key_bytes.len(), 16);
+                    payload[1..1+key_len].copy_from_slice(&key_bytes[..key_len]);
+                    
+                    let val_len = core::cmp::min(val_bytes.len(), 64);
+                    payload[17..17+val_len].copy_from_slice(&val_bytes[..val_len]);
+                    
+                    ensure_kv_service();
+                    
+                    let mut cap_idx = None;
+                    {
+                        let slots = get_shell_caps();
+                        for (i, slot_opt) in slots.iter().enumerate() {
+                            if let Some(cap) = slot_opt {
+                                if let Resource::IpcChannel { target_task } = cap.resource {
+                                    if target_task.0 == 82 {
+                                        cap_idx = Some(i);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let cap_idx = match cap_idx {
+                        Some(idx) => idx,
+                        None => {
+                            print_fail!("no capability");
+                            return Ok(());
+                        }
+                    };
+                    
+                    match process::ipc::sys_send_typed(cap_idx, process::IpcTag::KVSet as u16, 1, &payload) {
+                        Ok(()) => {
+                            match process::ipc::sys_receive_typed() {
+                                Ok(reply) => {
+                                    if reply.payload[0] == 0 {
+                                        let k_str = core::str::from_utf8(key_bytes).unwrap_or("");
+                                        let v_str = core::str::from_utf8(val_bytes).unwrap_or("");
+                                        print_ok!("set slot {}: key={} value={}", slot, k_str, v_str);
+                                    } else if reply.payload[0] == 1 {
+                                        print_fail!("permission denied (no capability for slot {})", slot);
+                                    } else {
+                                        print_fail!("invalid slot {}", slot);
+                                    }
+                                }
+                                Err(e) => {
+                                    print_fail!("receive failed: {:?}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            print_fail!("send failed: {:?}", e);
+                        }
+                    }
+                }
+                b"get" => {
+                    let slot = parse_usize(tok2)?;
+                    if slot >= 32 {
+                        print_fail!("slot index {} out of range (0-31)", slot);
+                        return Ok(());
+                    }
+                    
+                    ensure_kv_service();
+                    
+                    let mut cap_idx = None;
+                    {
+                        let slots = get_shell_caps();
+                        for (i, slot_opt) in slots.iter().enumerate() {
+                            if let Some(cap) = slot_opt {
+                                if let Resource::IpcChannel { target_task } = cap.resource {
+                                    if target_task.0 == 82 {
+                                        cap_idx = Some(i);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let cap_idx = match cap_idx {
+                        Some(idx) => idx,
+                        None => {
+                            print_fail!("no capability");
+                            return Ok(());
+                        }
+                    };
+                    
+                    let payload = [slot as u8];
+                    match process::ipc::sys_send_typed(cap_idx, process::IpcTag::KVGet as u16, 1, &payload) {
+                        Ok(()) => {
+                            match process::ipc::sys_receive_typed() {
+                                Ok(reply) => {
+                                    if reply.payload[0] == 0 {
+                                        let mut key_len = 0;
+                                        while key_len < 16 && reply.payload[1 + key_len] != 0 {
+                                            key_len += 1;
+                                        }
+                                        let mut val_len = 0;
+                                        while val_len < 64 && reply.payload[17 + val_len] != 0 {
+                                            val_len += 1;
+                                        }
+                                        let k_str = core::str::from_utf8(&reply.payload[1..1+key_len]).unwrap_or("");
+                                        let v_str = core::str::from_utf8(&reply.payload[17..17+val_len]).unwrap_or("");
+                                        print_ok!("get slot {}: key={} value={}", slot, k_str, v_str);
+                                    } else if reply.payload[0] == 1 {
+                                        print_fail!("permission denied (no capability for slot {})", slot);
+                                    } else {
+                                        print_fail!("invalid slot {}", slot);
+                                    }
+                                }
+                                Err(e) => {
+                                    print_fail!("receive failed: {:?}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            print_fail!("send failed: {:?}", e);
+                        }
+                    }
+                }
+                b"grant" => {
+                    let slot = parse_usize(tok2)?;
+                    let target_task_id = parse_usize(tok3)?;
+                    
+                    let donor_cap = {
+                        let slots = get_shell_caps();
+                        let mut found = None;
+                        for cap_opt in slots.iter() {
+                            if let Some(cap) = cap_opt {
+                                if let Resource::KVEntry { slot: cap_slot, .. } = cap.resource {
+                                    if cap_slot == slot {
+                                        found = Some(*cap);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        found
+                    };
+                    
+                    let donor = match donor_cap {
+                        Some(c) => c,
+                        None => {
+                            print_fail!("no capability");
+                            return Ok(());
+                        }
+                    };
+                    
+                    let derived = Capability {
+                        resource: Resource::KVEntry { slot, readable: true, writable: false },
+                        read: true,
+                        write: false,
+                        grant: false,
+                        sealed: false,
+                        id: 0,
+                        origin: Some(donor.id),
+                    };
+                    
+                    let mut new_id = 0;
+                    {
+                        let mut sched = scheduler::SCHEDULER.lock();
+                        if sched.tasks[target_task_id].is_none() {
+                            sched.tasks[target_task_id] = Some(Task::new(TaskId(target_task_id), park, CapTable::new()));
+                            crate::process::TASKS_SPAWNED.fetch_add(1, Ordering::SeqCst);
+                        }
+                        if let Some(ref mut target_task) = sched.tasks[target_task_id] {
+                            let new_slot = target_task.cap_table.insert(derived).unwrap();
+                            if let Some(ref mut cap) = target_task.cap_table.slots[new_slot] {
+                                cap.origin = Some(donor.id);
+                                new_id = cap.id;
+                            }
+                        }
+                    }
+                    
+                    print_ok!("granted read-only KV slot {} to task {}", slot, target_task_id);
+                }
+                b"revoke" => {
+                    let slot = parse_usize(tok2)?;
+                    
+                    let shell_slot_idx = {
+                        let slots = get_shell_caps();
+                        let mut found = None;
+                        for (i, cap_opt) in slots.iter().enumerate() {
+                            if let Some(cap) = cap_opt {
+                                if let Resource::KVEntry { slot: cap_slot, .. } = cap.resource {
+                                    if cap_slot == slot {
+                                        found = Some(i);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        found
+                    };
+                    
+                    match shell_slot_idx {
+                        Some(idx) => {
+                            let mut sched = scheduler::SCHEDULER.lock();
+                            let task = sched.get_task_mut(TaskId(64)).unwrap();
+                            let revoked = task.cap_table.kernel_revoke(idx);
+                            if let Some(cap) = revoked {
+                                print_ok!("revoked KV slot {} id={}; access denied", slot, cap.id);
+                            } else {
+                                print_fail!("revocation check failed");
+                            }
+                        }
+                        None => {
+                            print_fail!("slot {} empty", slot);
+                        }
+                    }
+                }
+                other => {
+                    let s = core::str::from_utf8(other).unwrap_or("");
+                    print_fail!("unknown kv subcommand: {}", s);
+                }
+            }
+        }
+        (b"log", _) => {
+            match tok1 {
+                b"publish" => {
+                    let kind_val = parse_usize(tok2)?;
+                    if kind_val >= 16 {
+                        print_fail!("kind {} out of range (0-15)", kind_val);
+                        return Ok(());
+                    }
+                    let kind = kind_val as u8;
+                    if tok3.is_empty() {
+                        print_fail!("Usage: log publish <kind> <message>");
+                        return Ok(());
+                    }
+                    
+                    ensure_log_service();
+                    
+                    let mut cap_idx = None;
+                    {
+                        let slots = get_shell_caps();
+                        for (i, slot_opt) in slots.iter().enumerate() {
+                            if let Some(cap) = slot_opt {
+                                if let Resource::IpcChannel { target_task } = cap.resource {
+                                    if target_task.0 == 83 {
+                                        cap_idx = Some(i);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let cap_idx = match cap_idx {
+                        Some(idx) => idx,
+                        None => {
+                            print_fail!("no capability");
+                            return Ok(());
+                        }
+                    };
+                    
+                    let mut payload = [0u8; 65];
+                    payload[0] = kind as u8;
+                    let msg_len = core::cmp::min(tok3.len(), 64);
+                    payload[1..1+msg_len].copy_from_slice(&tok3[..msg_len]);
+                    
+                    match process::ipc::sys_send_typed(cap_idx, process::IpcTag::LogPublish as u16, 1, &payload[..1+msg_len]) {
+                        Ok(()) => {
+                            match process::ipc::sys_receive_typed() {
+                                Ok(reply) => {
+                                    if reply.payload[0] == 0 {
+                                        let msg_str = core::str::from_utf8(tok3).unwrap_or("");
+                                        print_ok!("published log kind {}: {}", kind, msg_str);
+                                    } else if reply.payload[0] == 1 {
+                                        print_fail!("permission denied (no capability for log kind {})", kind);
+                                    } else {
+                                        print_fail!("invalid kind {}", kind);
+                                    }
+                                }
+                                Err(e) => {
+                                    print_fail!("receive failed: {:?}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            print_fail!("send failed: {:?}", e);
+                        }
+                    }
+                }
+                b"read" => {
+                    let kind_val = parse_usize(tok2)?;
+                    if kind_val >= 16 {
+                        print_fail!("kind {} out of range (0-15)", kind_val);
+                        return Ok(());
+                    }
+                    let kind = kind_val as u8;
+                    
+                    ensure_log_service();
+                    
+                    let mut cap_idx = None;
+                    {
+                        let slots = get_shell_caps();
+                        for (i, slot_opt) in slots.iter().enumerate() {
+                            if let Some(cap) = slot_opt {
+                                if let Resource::IpcChannel { target_task } = cap.resource {
+                                    if target_task.0 == 83 {
+                                        cap_idx = Some(i);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let cap_idx = match cap_idx {
+                        Some(idx) => idx,
+                        None => {
+                            print_fail!("no capability");
+                            return Ok(());
+                        }
+                    };
+                    
+                    let payload = [kind as u8];
+                    match process::ipc::sys_send_typed(cap_idx, process::IpcTag::LogRead as u16, 1, &payload) {
+                        Ok(()) => {
+                            match process::ipc::sys_receive_typed() {
+                                Ok(reply) => {
+                                    if reply.payload[0] == 0 {
+                                        let tick = u64::from_ne_bytes(reply.payload[1..9].try_into().unwrap());
+                                        let producer = usize::from_ne_bytes(reply.payload[9..17].try_into().unwrap());
+                                        let len = usize::from_ne_bytes(reply.payload[18..26].try_into().unwrap());
+                                        let msg_bytes = &reply.payload[26..26+len];
+                                        let msg_str = core::str::from_utf8(msg_bytes).unwrap_or("");
+                                        print_ok!("[{}] producer={} kind={} message={}", tick, producer, kind, msg_str);
+                                    } else if reply.payload[0] == 1 {
+                                        print_fail!("permission denied (no capability for log kind {})", kind);
+                                    } else if reply.payload[0] == 2 {
+                                        print_info!("no new log entries for kind {}", kind);
+                                    } else {
+                                        print_fail!("invalid kind {}", kind);
+                                    }
+                                }
+                                Err(e) => {
+                                    print_fail!("receive failed: {:?}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            print_fail!("send failed: {:?}", e);
+                        }
+                    }
+                }
+                b"grant" => {
+                    let kind_val = parse_usize(tok2)?;
+                    if kind_val >= 16 {
+                        print_fail!("kind {} out of range (0-15)", kind_val);
+                        return Ok(());
+                    }
+                    let kind = kind_val as u8;
+                    
+                    let mut split_idx = 0;
+                    while split_idx < tok3.len() && tok3[split_idx] != b' ' {
+                        split_idx += 1;
+                    }
+                    if split_idx >= tok3.len() {
+                        print_fail!("Usage: log grant <kind> <task> <r|w|rw>");
+                        return Ok(());
+                    }
+                    let target_task_bytes = &tok3[..split_idx];
+                    let mut rights_start = split_idx;
+                    while rights_start < tok3.len() && tok3[rights_start] == b' ' {
+                        rights_start += 1;
+                    }
+                    if rights_start >= tok3.len() {
+                        print_fail!("Usage: log grant <kind> <task> <r|w|rw>");
+                        return Ok(());
+                    }
+                    let rights_bytes = &tok3[rights_start..];
+                    
+                    let target_task_id = parse_usize(target_task_bytes)?;
+                    
+                    let donor_cap = {
+                        let slots = get_shell_caps();
+                        let mut found = None;
+                        for cap_opt in slots.iter() {
+                            if let Some(cap) = cap_opt {
+                                if let Resource::LogChannel { kind: cap_kind, .. } = cap.resource {
+                                    if cap_kind == kind {
+                                        found = Some(*cap);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        found
+                    };
+                    
+                    let donor = match donor_cap {
+                        Some(c) => c,
+                        None => {
+                            print_fail!("no capability");
+                            return Ok(());
+                        }
+                    };
+                    
+                    let req_read = rights_bytes == b"r" || rights_bytes == b"rw";
+                    let req_write = rights_bytes == b"w" || rights_bytes == b"rw";
+                    
+                    let derived = Capability {
+                        resource: Resource::LogChannel {
+                            kind,
+                            readable: donor.read && req_read,
+                            writable: donor.write && req_write,
+                        },
+                        read: donor.read && req_read,
+                        write: donor.write && req_write,
+                        grant: false,
+                        sealed: false,
+                        id: 0,
+                        origin: Some(donor.id),
+                    };
+                    
+                    let mut _new_id = 0;
+                    {
+                        let mut sched = scheduler::SCHEDULER.lock();
+                        if sched.tasks[target_task_id].is_none() {
+                            sched.tasks[target_task_id] = Some(Task::new(TaskId(target_task_id), park, CapTable::new()));
+                            crate::process::TASKS_SPAWNED.fetch_add(1, Ordering::SeqCst);
+                        }
+                        if let Some(ref mut target_task) = sched.tasks[target_task_id] {
+                            let new_slot = target_task.cap_table.insert(derived).unwrap();
+                            if let Some(ref mut cap) = target_task.cap_table.slots[new_slot] {
+                                cap.origin = Some(donor.id);
+                                _new_id = cap.id;
+                            }
+                        }
+                    }
+                    
+                    let r_str = if req_read && req_write { "read-write" } else if req_read { "read-only" } else { "write-only" };
+                    print_ok!("granted {} LogChannel kind {} to task {}", r_str, kind, target_task_id);
+                }
+                b"revoke" => {
+                    let kind_val = parse_usize(tok2)?;
+                    let kind = kind_val as u8;
+                    
+                    let shell_slot_idx = {
+                        let slots = get_shell_caps();
+                        let mut found = None;
+                        for (i, cap_opt) in slots.iter().enumerate() {
+                            if let Some(cap) = cap_opt {
+                                if let Resource::LogChannel { kind: cap_kind, .. } = cap.resource {
+                                    if cap_kind == kind {
+                                        found = Some(i);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        found
+                    };
+                    
+                    match shell_slot_idx {
+                        Some(idx) => {
+                            let mut sched = scheduler::SCHEDULER.lock();
+                            let task = sched.get_task_mut(TaskId(64)).unwrap();
+                            let revoked = task.cap_table.kernel_revoke(idx);
+                            if let Some(cap) = revoked {
+                                print_ok!("revoked LogChannel kind {} id={}; access denied", kind, cap.id);
+                            } else {
+                                print_fail!("revocation check failed");
+                            }
+                        }
+                        None => {
+                            print_fail!("kind {} empty", kind);
+                        }
+                    }
+                }
+                b"tail" => {
+                    let mut readable_kinds = [false; 16];
+                    {
+                        let slots = get_shell_caps();
+                        for cap_opt in slots.iter() {
+                            if let Some(cap) = cap_opt {
+                                if let Resource::LogChannel { kind, readable, .. } = cap.resource {
+                                    if readable && cap.read {
+                                        readable_kinds[kind as usize] = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    ensure_log_service();
+                    print_info!("tailing log kinds (press 'q' to quit)...");
+                    
+                    let mut last_tick = preempt::stats().ticks;
+                    loop {
+                        let current_tick = preempt::stats().ticks;
+                        if current_tick != last_tick {
+                            last_tick = current_tick;
+                            
+                            let key_opt = crate::drivers::serial::SERIAL1.lock().try_read();
+                            if let Some(b) = key_opt {
+                                if b == b'q' || b == b'Q' {
+                                    print_ok!("log tail stopped");
+                                    return Ok(());
+                                }
+                            }
+                            
+                            for kind in 0..16 {
+                                if !readable_kinds[kind] { continue; }
+                                
+                                let mut cap_idx = None;
+                                {
+                                    let slots = get_shell_caps();
+                                    for (i, slot_opt) in slots.iter().enumerate() {
+                                        if let Some(cap) = slot_opt {
+                                            if let Resource::IpcChannel { target_task } = cap.resource {
+                                                if target_task.0 == 83 {
+                                                    cap_idx = Some(i);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                let cap_idx = match cap_idx {
+                                    Some(idx) => idx,
+                                    None => {
+                                        print_fail!("no capability");
+                                        return Ok(());
+                                    }
+                                };
+                                
+                                loop {
+                                    let payload = [kind as u8];
+                                    if process::ipc::sys_send_typed(cap_idx, process::IpcTag::LogRead as u16, 1, &payload).is_ok() {
+                                        if let Ok(reply) = process::ipc::sys_receive_typed() {
+                                            if reply.payload[0] == 0 {
+                                                let tick = u64::from_ne_bytes(reply.payload[1..9].try_into().unwrap());
+                                                let producer = usize::from_ne_bytes(reply.payload[9..17].try_into().unwrap());
+                                                let len = usize::from_ne_bytes(reply.payload[18..26].try_into().unwrap());
+                                                let msg_bytes = &reply.payload[26..26+len];
+                                                let msg_str = core::str::from_utf8(msg_bytes).unwrap_or("");
+                                                print_info!("  [{}] prod={} kind={} message={}", tick, producer, kind, msg_str);
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        scheduler::yield_cpu();
+                    }
+                }
+                other => {
+                    let s = core::str::from_utf8(other).unwrap_or("");
+                    print_fail!("unknown log subcommand: {}", s);
                 }
             }
         }
@@ -1424,6 +2109,356 @@ fn print_diffed_buffers() {
         } else {
             if let Ok(s) = core::str::from_utf8(clean_cur) {
                 crate::print!("  {}\n", s);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct KvSlot {
+    key: [u8; 16],
+    value: [u8; 64],
+}
+
+impl KvSlot {
+    const fn new() -> Self {
+        Self {
+            key: [0; 16],
+            value: [0; 64],
+        }
+    }
+}
+
+struct KvStore {
+    slots: [KvSlot; 32],
+}
+
+impl KvStore {
+    const fn new() -> Self {
+        Self {
+            slots: [KvSlot::new(); 32],
+        }
+    }
+}
+
+static KV_STORE: crate::drivers::serial::Spinlock<KvStore> = crate::drivers::serial::Spinlock::new(KvStore::new());
+
+fn check_sender_cap(sender_id: TaskId, slot: usize, require_write: bool) -> bool {
+    let sched = scheduler::SCHEDULER.lock();
+    if let Some(task) = sched.get_task(sender_id) {
+        for cap_opt in task.cap_table.slots.iter() {
+            if let Some(cap) = cap_opt {
+                if let Resource::KVEntry { slot: cap_slot, readable, writable } = cap.resource {
+                    if cap_slot == slot {
+                        if require_write {
+                            if writable && cap.write {
+                                return true;
+                            }
+                        } else {
+                            if readable && cap.read {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+fn ensure_kv_service() {
+    let mut sched = scheduler::SCHEDULER.lock();
+    if sched.tasks[82].is_none() {
+        let mut caps = CapTable::new();
+        let _ = caps.insert(Capability {
+            resource: Resource::IpcChannel { target_task: TaskId(64) },
+            read: true,
+            write: true,
+            grant: false,
+            sealed: false,
+            id: 0,
+            origin: None,
+        }).unwrap();
+        sched.tasks[82] = Some(Task::new(TaskId(82), kv_service_main, caps));
+        crate::process::TASKS_SPAWNED.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+extern "C" fn kv_service_main() -> ! {
+    loop {
+        match process::ipc::sys_receive_typed() {
+            Ok(msg) => {
+                let mut reply_payload = [0u8; 128];
+                let mut reply_len = 1;
+
+                match msg.tag {
+                    process::IpcTag::KVGet => {
+                        if msg.len < 1 {
+                            reply_payload[0] = 2; // invalid
+                        } else {
+                            let slot = msg.payload[0] as usize;
+                            if slot >= 32 {
+                                reply_payload[0] = 2; // invalid slot
+                            } else if !check_sender_cap(msg.sender, slot, false) {
+                                reply_payload[0] = 1; // permission denied
+                            } else {
+                                reply_payload[0] = 0; // success
+                                let store = KV_STORE.lock();
+                                reply_payload[1..17].copy_from_slice(&store.slots[slot].key);
+                                reply_payload[17..81].copy_from_slice(&store.slots[slot].value);
+                                reply_len = 81;
+                            }
+                        }
+                    }
+                    process::IpcTag::KVSet => {
+                        if msg.len < 81 {
+                            reply_payload[0] = 2; // invalid
+                        } else {
+                            let slot = msg.payload[0] as usize;
+                            if slot >= 32 {
+                                reply_payload[0] = 2; // invalid slot
+                            } else if !check_sender_cap(msg.sender, slot, true) {
+                                reply_payload[0] = 1; // permission denied
+                            } else {
+                                reply_payload[0] = 0; // success
+                                let mut store = KV_STORE.lock();
+                                store.slots[slot].key.copy_from_slice(&msg.payload[1..17]);
+                                store.slots[slot].value.copy_from_slice(&msg.payload[17..81]);
+                            }
+                        }
+                    }
+                    _ => {
+                        reply_payload[0] = 2; // invalid tag
+                    }
+                }
+
+                // Install dynamic IpcChannel to sender in slot 1 of KV service (task 82)
+                {
+                    let mut sched = scheduler::SCHEDULER.lock();
+                    let my_task = sched.get_task_mut(TaskId(82)).unwrap();
+                    my_task.cap_table.slots[1] = Some(Capability {
+                        resource: Resource::IpcChannel { target_task: msg.sender },
+                        read: true,
+                        write: true,
+                        grant: false,
+                        sealed: false,
+                        id: 8200 + msg.sender.0 as u64,
+                        origin: None,
+                    });
+                }
+
+                // Send reply back to client
+                let _ = process::ipc::sys_send_typed(1, process::IpcTag::Raw as u16, 1, &reply_payload[..reply_len]);
+            }
+            Err(_) => {
+                scheduler::yield_cpu();
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct LogEntry {
+    pub tick:     u64,
+    pub producer: TaskId,
+    pub kind:     u8,        // event type, 0..=15
+    pub msg:      [u8; 64],
+    pub len:      usize,
+}
+
+impl LogEntry {
+    const fn new() -> Self {
+        Self {
+            tick: 0,
+            producer: TaskId(0),
+            kind: 0,
+            msg: [0; 64],
+            len: 0,
+        }
+    }
+}
+
+const LOG_CAPACITY: usize = 128;
+
+pub struct LogRingBuffer {
+    pub buffer: [LogEntry; LOG_CAPACITY],
+    pub write_pos: usize,
+}
+
+impl LogRingBuffer {
+    const fn new() -> Self {
+        Self {
+            buffer: [LogEntry::new(); LOG_CAPACITY],
+            write_pos: 0,
+        }
+    }
+
+    pub fn push(&mut self, entry: LogEntry) {
+        let idx = self.write_pos % LOG_CAPACITY;
+        self.buffer[idx] = entry;
+        self.write_pos += 1;
+    }
+}
+
+static LOG: crate::drivers::serial::Spinlock<LogRingBuffer> = crate::drivers::serial::Spinlock::new(LogRingBuffer::new());
+
+static CURSORS: crate::drivers::serial::Spinlock<[usize; crate::process::MAX_TASKS]> = crate::drivers::serial::Spinlock::new([0; crate::process::MAX_TASKS]);
+
+fn check_log_sender_cap(sender_id: TaskId, kind: u8, require_write: bool) -> bool {
+    let sched = scheduler::SCHEDULER.lock();
+    if let Some(task) = sched.get_task(sender_id) {
+        for cap_opt in task.cap_table.slots.iter() {
+            if let Some(cap) = cap_opt {
+                if let Resource::LogChannel { kind: cap_kind, readable, writable } = cap.resource {
+                    if cap_kind == kind {
+                        if require_write {
+                            if writable && cap.write {
+                                return true;
+                            }
+                        } else {
+                            if readable && cap.read {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+fn ensure_log_service() {
+    let mut sched = scheduler::SCHEDULER.lock();
+    if sched.tasks[83].is_none() {
+        let mut caps = CapTable::new();
+        let _ = caps.insert(Capability {
+            resource: Resource::IpcChannel { target_task: TaskId(64) },
+            read: true,
+            write: true,
+            grant: false,
+            sealed: false,
+            id: 0,
+            origin: None,
+        }).unwrap();
+        sched.tasks[83] = Some(Task::new(TaskId(83), log_service_main, caps));
+        crate::process::TASKS_SPAWNED.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+extern "C" fn log_service_main() -> ! {
+    loop {
+        match process::ipc::sys_receive_typed() {
+            Ok(msg) => {
+                let mut reply_payload = [0u8; 128];
+                let mut reply_len = 1;
+
+                match msg.tag {
+                    process::IpcTag::LogPublish => {
+                        if msg.len < 1 {
+                            reply_payload[0] = 2; // invalid
+                        } else {
+                            let kind = msg.payload[0];
+                            if kind >= 16 {
+                                reply_payload[0] = 3; // invalid kind
+                            } else if !check_log_sender_cap(msg.sender, kind, true) {
+                                reply_payload[0] = 1; // permission denied
+                            } else {
+                                let mut entry = LogEntry::new();
+                                entry.tick = preempt::stats().ticks;
+                                entry.producer = msg.sender;
+                                entry.kind = kind;
+                                let msg_bytes_len = core::cmp::min(msg.len - 1, 64);
+                                entry.len = msg_bytes_len;
+                                entry.msg[..msg_bytes_len].copy_from_slice(&msg.payload[1..1+msg_bytes_len]);
+                                
+                                LOG.lock().push(entry);
+                                reply_payload[0] = 0; // success
+                            }
+                        }
+                    }
+                    process::IpcTag::LogRead => {
+                        if msg.len < 1 {
+                            reply_payload[0] = 3; // invalid
+                        } else {
+                            let kind = msg.payload[0];
+                            if kind >= 16 {
+                                reply_payload[0] = 3; // invalid kind
+                            } else if !check_log_sender_cap(msg.sender, kind, false) {
+                                reply_payload[0] = 1; // permission denied
+                            } else {
+                                let sender_idx = msg.sender.0;
+                                let oldest_valid = {
+                                    let log = LOG.lock();
+                                    if log.write_pos > LOG_CAPACITY {
+                                        log.write_pos - LOG_CAPACITY
+                                    } else {
+                                        0
+                                    }
+                                };
+                                
+                                let mut cursors = CURSORS.lock();
+                                if cursors[sender_idx] < oldest_valid {
+                                    cursors[sender_idx] = oldest_valid;
+                                }
+                                
+                                let mut found_entry = None;
+                                let mut found_idx = 0;
+                                {
+                                    let log = LOG.lock();
+                                    for idx in cursors[sender_idx]..log.write_pos {
+                                        let entry = log.buffer[idx % LOG_CAPACITY];
+                                        if entry.kind == kind {
+                                            found_entry = Some(entry);
+                                            found_idx = idx;
+                                            break;
+                                        }
+                                    }
+                                }
+                                
+                                if let Some(entry) = found_entry {
+                                    cursors[sender_idx] = found_idx + 1;
+                                    reply_payload[0] = 0; // success
+                                    reply_payload[1..9].copy_from_slice(&entry.tick.to_ne_bytes());
+                                    reply_payload[9..17].copy_from_slice(&entry.producer.0.to_ne_bytes());
+                                    reply_payload[17] = entry.kind;
+                                    reply_payload[18..26].copy_from_slice(&entry.len.to_ne_bytes());
+                                    reply_payload[26..26+64].copy_from_slice(&entry.msg);
+                                    reply_len = 90;
+                                } else {
+                                    // No new entry, advance cursor to current write_pos
+                                    cursors[sender_idx] = LOG.lock().write_pos;
+                                    reply_payload[0] = 2; // empty
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        reply_payload[0] = 3; // invalid tag
+                    }
+                }
+
+                // Install dynamic IpcChannel to sender in slot 1 of Log service (task 83)
+                {
+                    let mut sched = scheduler::SCHEDULER.lock();
+                    let my_task = sched.get_task_mut(TaskId(83)).unwrap();
+                    my_task.cap_table.slots[1] = Some(Capability {
+                        resource: Resource::IpcChannel { target_task: msg.sender },
+                        read: true,
+                        write: true,
+                        grant: false,
+                        sealed: false,
+                        id: 8300 + msg.sender.0 as u64,
+                        origin: None,
+                    });
+                }
+
+                // Send reply back to client using the reply tag LogAck
+                let _ = process::ipc::sys_send_typed(1, process::IpcTag::LogAck as u16, 1, &reply_payload[..reply_len]);
+            }
+            Err(_) => {
+                scheduler::yield_cpu();
             }
         }
     }

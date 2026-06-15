@@ -130,6 +130,25 @@ runix> sched preempt-race
 | `perf` | Print live kernel performance and health statistics: ticks, preemptions, deferred ticks, IPC messages delivered, faults caught, and tasks spawned/terminated. | `preempt::stats` + global atomic counters |
 | `watch <command> <interval>` | Re-run any command every `<interval>` ticks and print a line-by-line diff of the output. Press any key to exit. | `REDIRECT_TARGET` serial hook |
 
+### Capability-gated Key-Value Store - Group G
+
+| Command | Description | Real path |
+|---|---|---|
+| `kv set <slot> <key> <value>` | Write to a KV slot the shell holds a write capability for. | `ipc::sys_send_typed` to Task 82 |
+| `kv get <slot> <key>` | Read from a KV slot the shell holds a read capability for. | `ipc::sys_send_typed` to Task 82 |
+| `kv grant <slot> <task>` | Derive and transfer a read-only capability for a slot to another task. | `Capability::attenuate` + `CapTable::insert` |
+| `kv revoke <slot>` | Revoke the capability for a slot from the shell's table. | `CapTable::kernel_revoke` |
+
+### Event Log Service - Group H
+
+| Command | Description | Real path |
+|---|---|---|
+| `log publish <kind> <message>` | Publish an event of specific kind to the log service. | `ipc::sys_send_typed` to Task 83 |
+| `log read <kind>` | Read next unread event of given kind from the log service. | `ipc::sys_send_typed` to Task 83 |
+| `log grant <kind> <task> <r|w|rw>` | Derive and transfer a log channel capability with specific rights to a task. | `Capability::attenuate` + `CapTable::insert` |
+| `log revoke <kind>` | Revoke the shell's capability for a specific event log kind. | `CapTable::kernel_revoke` |
+| `log tail` | Continuously read and display all readable log kinds every tick. | `ipc::sys_send_typed` loop |
+
 ### Meta
 
 | Command | Description |
@@ -151,6 +170,8 @@ runix> sched preempt-race
 | `service list / restart` | Phase 6, 9 -- userspace ecosystem and service recovery |
 | `checkpoint / restore / migrate` | Phase 10 -- persistent system state and transparent migration |
 | `history / trace / perf / watch` | Observability & usability -- system health, event tracing, line diffing, scrollable history |
+| `kv set / get / grant / revoke` | Group G -- capability-gated Key-Value store running as a userspace service with pure IPC |
+| `log publish / read / grant / revoke / tail` | Group H -- capability-gated event log service with per-reader cursors and pure IPC |
 
 ---
 

@@ -71,6 +71,12 @@ fn resource_code(r: &Resource) -> u64 {
             0x2000 ^ (*start_vaddr as u64) ^ ((*size as u64) << 1) ^ (*writeable as u64)
         }
         Resource::Service { id } => 0x3000 ^ (*id as u64),
+        Resource::KVEntry { slot, readable, writable } => {
+            0x4000 ^ (*slot as u64) ^ ((*readable as u64) << 8) ^ ((*writable as u64) << 9)
+        }
+        Resource::LogChannel { kind, readable, writable } => {
+            0x5000 ^ (*kind as u64) ^ ((*readable as u64) << 8) ^ ((*writable as u64) << 9)
+        }
     }
 }
 
