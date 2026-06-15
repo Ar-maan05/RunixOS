@@ -1008,7 +1008,7 @@ fn dispatch(line: &[u8]) -> Result<(), ()> {
                 unsafe {
                     WATCH_LEN_CUR = 0;
                     *crate::drivers::serial::REDIRECT_TARGET.lock() = Some((
-                        WATCH_BUF_CUR.as_mut_ptr() as usize,
+                        (&raw mut WATCH_BUF_CUR) as usize,
                         1024,
                         (&raw mut WATCH_LEN_CUR) as usize,
                     ));
