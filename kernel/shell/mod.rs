@@ -490,7 +490,7 @@ fn dispatch(line: &[u8]) -> Result<(), ()> {
         (b"fault", b"cascade") => {
             let n = parse_usize(tok2)?;
             if !(1..=8).contains(&n) {
-                print_fail!("bad number: {}", n);
+                print_fail!("fault cascade count {} out of range (expected 1..=8)", n);
                 return Ok(());
             }
 
@@ -580,7 +580,7 @@ fn dispatch(line: &[u8]) -> Result<(), ()> {
         (b"ipc", b"stress") => {
             let n = parse_usize(tok2)?;
             if !(1..=8).contains(&n) {
-                print_fail!("bad number: {}", n);
+                print_fail!("stress count {} out of range (expected 1..=8)", n);
                 return Ok(());
             }
             
