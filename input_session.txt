@@ -1,0 +1,22 @@
+help
+cap list
+cap grant 0
+cap seal 0
+cap revoke 2
+cap audit
+\
+sched info
+sched timeslice
+sched preempt-race
+fault spawn
+fault cascade 3
+\
+ipc send 65 hello
+ipc typed 1 hi
+ipc stress 2
+service list
+service restart echo
+\
+checkpoint
+restore 0
+migrate 1 1

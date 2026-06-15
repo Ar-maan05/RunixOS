@@ -143,16 +143,44 @@ impl MessageQueue {
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
 
-/// Resolves the IpcChannel target from the current task's capability table.
-fn resolve_target(cap_idx: usize) -> Result<TaskId, IpcError> {
-    let sched = SCHEDULER.lock();
-    let id = sched.current_task_id.ok_or(IpcError::NoContext)?;
-    let task = sched.get_task(id).ok_or(IpcError::NoContext)?;
-    let cap  = task.cap_table.get(cap_idx).ok_or(IpcError::NoCapability)?;
+/// Validates a send capability against an **already-held** scheduler lock,
+/// resolving the IpcChannel it authorizes to a concrete target task.
+///
+/// This is the *validation* half of a send. Splitting it out so it can run under
+/// a caller-held lock is what lets the send path keep validation and use in one
+/// indivisible critical section (see `sys_send_typed`): the old design validated
+/// under its own short-lived lock and then re-locked to deliver, leaving a gap in
+/// which the capability could be revoked — the Phase 11 TOCTOU.
+fn resolve_target_locked(
+    sched: &crate::scheduler::Scheduler,
+    current: TaskId,
+    cap_idx: usize,
+) -> Result<TaskId, IpcError> {
+    let task = sched.get_task(current).ok_or(IpcError::NoContext)?;
+    let cap = task.cap_table.get(cap_idx).ok_or(IpcError::NoCapability)?;
     match cap.resource {
         Resource::IpcChannel { target_task } => Ok(target_task),
         _ => Err(IpcError::NoCapability),
     }
+}
+
+/// Resolves the IpcChannel target from the current task's capability table,
+/// acquiring the scheduler lock itself. Used by paths that only need a one-shot
+/// resolution (not the atomic validate→use of the blocking send).
+fn resolve_target(cap_idx: usize) -> Result<TaskId, IpcError> {
+    let sched = SCHEDULER.lock();
+    let id = sched.current_task_id.ok_or(IpcError::NoContext)?;
+    resolve_target_locked(&sched, id, cap_idx)
+}
+
+/// Outcome of one validate→use attempt inside the send loop.
+enum SendStep {
+    /// Message deposited and receiver marked runnable.
+    Delivered,
+    /// Target is gone (terminated/missing); fail without delivering.
+    Gone,
+    /// Target not ready to receive; sender parked, will retry after waking.
+    Blocked,
 }
 
 // ── Phase 3 & 5 public API ───────────────────────────────────────────────────
@@ -180,63 +208,110 @@ pub fn sys_send_typed(
         let sched = SCHEDULER.lock();
         sched.current_task_id.ok_or(IpcError::NoContext)?
     };
-    let target_task_id = resolve_target(cap_idx)?;
 
     let mut msg_payload = [0u8; 128];
     msg_payload[..payload.len()].copy_from_slice(payload);
-    let msg = Message {
-        sender: current_task_id,
-        tag,
-        version,
-        payload: msg_payload,
-        len: payload.len(),
-    };
+    let len = payload.len();
 
     loop {
-        let mut sched = SCHEDULER.lock();
+        // ── Non-preemptible capability validate→use region (Phase 11) ─────────
+        //
+        // The send capability is (re)validated and *used* inside one indivisible
+        // region, so the authority that delivers the message is exactly the
+        // authority we just checked — never a snapshot taken before a blocking
+        // wait, and never one another task revoked in the gap between check and
+        // use. This closes the TOCTOU the Phase 11 VULNERABLE/GUARDED experiment
+        // reproduces, now in the real path every ring-3 sender travels.
+        //
+        // The "use-point" — where the region must extend to — is deliberately
+        // AFTER both halves of delivery: the message is deposited in the
+        // receiver's `ipc_buffer` AND the receiver is marked `Ready`. The
+        // guarantee is therefore "a delivered message implies the capability was
+        // valid at the instant of delivery and the receiver will observe it";
+        // a half-delivery (deposited but receiver not woken, or vice versa) can
+        // never be observed.
+        //
+        // The blocking wait is OUTSIDE the region: a non-preemptible region must
+        // never contain a yield (the global preempt-count would leak to whatever
+        // task we yield to). Each wakeup re-enters the region and re-validates
+        // from scratch, so even a capability revoked *while the sender was
+        // blocked* is caught before the next delivery attempt.
+        let outcome = {
+            // The guard raises the non-preemptible count (and marks the window)
+            // and releases both when this scope ends — covering the early-return
+            // validation-failure path too. The blocking wait below is outside it.
+            let _region = crate::preempt::CriticalWindow::enter();
+            let mut sched = SCHEDULER.lock();
 
-        // Rendezvous: deliver immediately if target is waiting.
-        if let Some(target) = sched.get_task_mut(target_task_id) {
-            // Failure semantics: a dead target can never receive. Don't block
-            // the sender forever waiting on it — report it gone immediately.
-            if target.state == TaskState::Terminated {
-                // Clear any pending payload we parked while blocking, so it can
-                // never be mistaken for an inbound message if this sender later
-                // calls receive on its own buffer.
+            // VALIDATE.
+            match resolve_target_locked(&sched, current_task_id, cap_idx) {
+                Err(e) => {
+                    // Authority invalid/revoked: discard any payload parked on a
+                    // prior attempt so it can't be mistaken for an inbound message.
+                    if let Some(sender) = sched.get_task_mut(current_task_id) {
+                        sender.ipc_buffer = None;
+                    }
+                    return Err(e);
+                }
+                Ok(target_task_id) => {
+                    let msg = Message {
+                        sender: current_task_id,
+                        tag,
+                        version,
+                        payload: msg_payload,
+                        len,
+                    };
+
+                    // USE. Read the target's state first (immutable borrow), then
+                    // act, to keep the borrows of the two task slots disjoint.
+                    match sched.get_task(target_task_id).map(|t| t.state) {
+                        // A dead target can never receive: fail fast, don't block.
+                        None | Some(TaskState::Terminated) => SendStep::Gone,
+                        Some(TaskState::BlockedOnReceive) => {
+                            if let Some(target) = sched.get_task_mut(target_task_id) {
+                                target.ipc_buffer = Some(msg);
+                                target.state = TaskState::Ready;
+                            }
+                            SendStep::Delivered
+                        }
+                        Some(_) => {
+                            if let Some(sender) = sched.get_task_mut(current_task_id) {
+                                sender.state = TaskState::BlockedOnSend(target_task_id);
+                                sender.ipc_buffer = Some(msg);
+                            }
+                            SendStep::Blocked
+                        }
+                    }
+                }
+            }
+            // `_region` (and the scheduler lock) drop here: end of validate→use.
+        };
+
+        match outcome {
+            SendStep::Delivered => return Ok(()),
+            SendStep::Gone => {
+                let mut sched = SCHEDULER.lock();
                 if let Some(sender) = sched.get_task_mut(current_task_id) {
                     sender.ipc_buffer = None;
                 }
                 return Err(IpcError::TargetGone);
             }
-            if target.state == TaskState::BlockedOnReceive {
-                target.ipc_buffer = Some(msg);
-                target.state = TaskState::Ready;
-                return Ok(());
+            SendStep::Blocked => {
+                // Preemptible wait. A receiver that consumes our parked message
+                // clears our ipc_buffer; on resume we detect that and finish.
+                crate::scheduler::yield_cpu();
+                let consumed = {
+                    let sched = SCHEDULER.lock();
+                    match sched.get_task(current_task_id) {
+                        Some(t) => t.ipc_buffer.is_none(),
+                        None => return Err(IpcError::TargetGone),
+                    }
+                };
+                if consumed {
+                    return Ok(());
+                }
+                // Spurious wake: loop, re-validate, retry.
             }
-        } else {
-            if let Some(sender) = sched.get_task_mut(current_task_id) {
-                sender.ipc_buffer = None;
-            }
-            return Err(IpcError::TargetGone);
-        }
-
-        // Target not ready — block the sender.
-        if let Some(sender) = sched.get_task_mut(current_task_id) {
-            sender.state = TaskState::BlockedOnSend(target_task_id);
-            sender.ipc_buffer = Some(msg);
-        }
-
-        drop(sched);
-        crate::scheduler::yield_cpu();
-
-        // Resumed: check if the message was consumed.
-        let sched_check = SCHEDULER.lock();
-        if let Some(task) = sched_check.get_task(current_task_id) {
-            if task.ipc_buffer.is_none() {
-                return Ok(());
-            }
-        } else {
-            return Err(IpcError::TargetGone);
         }
     }
 }
@@ -315,7 +390,6 @@ pub fn sys_send_async(
         let sched = SCHEDULER.lock();
         sched.current_task_id.ok_or(IpcError::NoContext)?
     };
-    let target_task_id = resolve_target(cap_idx)?;
 
     let mut msg_payload = [0u8; 128];
     msg_payload[..payload.len()].copy_from_slice(payload);
@@ -327,24 +401,34 @@ pub fn sys_send_async(
         len: payload.len(),
     };
 
+    // Same non-preemptible validate→use region as `sys_send_typed`, minus the
+    // blocking wait (async send never parks). Validating and enqueuing under one
+    // held lock + preempt guard means the capability that authorizes the enqueue
+    // is the one we just checked.
+    crate::preempt::enter_critical();
     let mut sched = SCHEDULER.lock();
-    if let Some(target) = sched.get_task_mut(target_task_id) {
-        if target.state == TaskState::Terminated {
-            return Err(IpcError::TargetGone);
-        }
-        // Try to enqueue in target's message queue
-        if target.msg_queue.enqueue(msg).is_ok() {
-            // Wake up target if it's blocked on receive
-            if target.state == TaskState::BlockedOnReceive {
-                target.state = TaskState::Ready;
+
+    let result = match resolve_target_locked(&sched, current_task_id, cap_idx) {
+        Err(e) => Err(e),
+        Ok(target_task_id) => match sched.get_task_mut(target_task_id) {
+            Some(target) if target.state == TaskState::Terminated => Err(IpcError::TargetGone),
+            Some(target) => {
+                if target.msg_queue.enqueue(msg).is_ok() {
+                    if target.state == TaskState::BlockedOnReceive {
+                        target.state = TaskState::Ready;
+                    }
+                    Ok(())
+                } else {
+                    Err(IpcError::QueueFull)
+                }
             }
-            Ok(())
-        } else {
-            Err(IpcError::QueueFull)
-        }
-    } else {
-        Err(IpcError::TargetGone)
-    }
+            None => Err(IpcError::TargetGone),
+        },
+    };
+
+    drop(sched);
+    crate::preempt::exit_critical();
+    result
 }
 
 /// Non-blocking receive: returns the first message from the queue or blocked senders,

@@ -50,9 +50,22 @@ pub struct Task {
 pub const MAX_TASKS: usize = 132;
 pub const STACK_SIZE: usize = 32768; // 32 KiB stack
 
+/// A single task's kernel stack, forced to 16-byte alignment.
+///
+/// A bare `[u8; N]` has alignment 1, so `&TASK_STACKS[idx]` (and thus every
+/// task's initial `rsp`) could land on any byte boundary depending on where the
+/// linker places the static. The x86_64 SysV ABI requires 16-byte stack
+/// alignment, and stack pushes must be 8-aligned; an unaligned stack base is
+/// undefined behavior (and trips debug's misaligned-pointer check). Aligning the
+/// element type pins every stack — and every derived `rsp` — to a 16-byte
+/// boundary regardless of the static's placement.
+#[repr(C, align(16))]
+pub struct TaskStack(pub [u8; STACK_SIZE]);
+
 // Statically allocate task stacks to avoid heap requirements in Phase 1
 #[no_mangle]
-pub static mut TASK_STACKS: [[u8; STACK_SIZE]; MAX_TASKS] = [[0; STACK_SIZE]; MAX_TASKS];
+pub static mut TASK_STACKS: [TaskStack; MAX_TASKS] =
+    [const { TaskStack([0; STACK_SIZE]) }; MAX_TASKS];
 
 extern "C" {
     /// Assembly stub to switch execution context between two tasks.
@@ -63,6 +76,7 @@ extern "C" {
 core::arch::global_asm!(
     ".global switch_context",
     "switch_context:",
+    "    pushfq",
     "    push rbp",
     "    push rbx",
     "    push r12",
@@ -77,6 +91,7 @@ core::arch::global_asm!(
     "    pop r12",
     "    pop rbx",
     "    pop rbp",
+    "    popfq",
     "    ret"
 );
 
@@ -93,6 +108,29 @@ extern "C" {
     fn iret_to_user();
 }
 
+// Trampoline a *fresh* kernel task is resumed through on its first schedule.
+// `switch_context` reaches it via `ret` with `r15` preloaded to the task's real
+// entry point (see `Task::new`). It enables interrupts before entering the body.
+//
+// Why this matters under Phase 11: a fresh task can be scheduled for the first
+// time *from the timer ISR* (an involuntary preemption picks it). The ISR runs
+// with IF=0, and the cooperative `switch_context` is a plain `ret` that does not
+// touch RFLAGS — so without this `sti` the task would run with interrupts
+// disabled, no further timer tick could ever fire, and the system would wedge.
+// (Tasks resumed *after* being preempted restore IF via the ISR's `iretq`; only
+// first-run tasks need this.) Ring-3 tasks use `iret_to_user` instead and manage
+// IF through their iretq frame.
+core::arch::global_asm!(
+    ".global kernel_task_trampoline",
+    "kernel_task_trampoline:",
+    "    sti",
+    "    jmp r15",
+);
+
+extern "C" {
+    fn kernel_task_trampoline();
+}
+
 impl Task {
     /// Creates a new Task structure and sets up its stack for context switching.
     pub fn new(id: TaskId, entry: extern "C" fn() -> !, cap_table: CapTable) -> Self {
@@ -102,24 +140,29 @@ impl Task {
         let stack_top = unsafe { &TASK_STACKS[idx] as *const _ as usize + STACK_SIZE };
         let mut rsp = stack_top;
 
-        // Set up stack frames for cooperative switch resume
-        rsp -= 8; // dummy return address
-        unsafe {
-            *(rsp as *mut usize) = 0;
-        }
+        // Build the frame `switch_context` consumes on this task's first run.
+        // `switch_context` pops r15,r14,r13,r12,rbx,rbp, then popfq, then `ret`s. We arrange:
+        //   - the `ret` target = `kernel_task_trampoline` (does `sti; jmp r15`)
+        //   - r15 (popped first, so lowest address) = the real entry point
+        // so the task starts with interrupts enabled and jumps to `entry`.
+        rsp -= 8; // dummy slot above the ret target (unused; entry never returns)
+        unsafe { *(rsp as *mut usize) = 0; }
 
-        rsp -= 8; // entry point of the task
-        unsafe {
-            *(rsp as *mut usize) = entry as usize;
-        }
+        rsp -= 8; // ret target consumed after the 6 register pops + popfq
+        unsafe { *(rsp as *mut usize) = kernel_task_trampoline as *const () as usize; }
 
-        // Space for registers: r15, r14, r13, r12, rbx, rbp
-        for _ in 0..6 {
+        // Initial rflags (0x202 enables interrupts, SysV ABI default)
+        rsp -= 8;
+        unsafe { *(rsp as *mut usize) = 0x202; }
+
+        // Saved callee regs, pushed high→low so the *first* popped (r15) is lowest:
+        // rbp, rbx, r12, r13, r14, then r15 = entry.
+        for _ in 0..5 {
             rsp -= 8;
-            unsafe {
-                *(rsp as *mut usize) = 0;
-            }
+            unsafe { *(rsp as *mut usize) = 0; }
         }
+        rsp -= 8; // r15 (popped first) = entry point
+        unsafe { *(rsp as *mut usize) = entry as usize; }
 
         Self {
             id,
@@ -168,6 +211,9 @@ impl Task {
 
         // `switch_context`'s `ret` target: the iretq trampoline.
         push(iret_to_user as *const () as usize);
+
+        // Saved RFLAGS popped by `switch_context`'s `popfq`.
+        push(0x202);
 
         // Saved callee-saved registers popped by `switch_context` (r15..rbp).
         for _ in 0..6 {

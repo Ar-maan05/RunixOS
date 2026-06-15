@@ -17,6 +17,8 @@ pub mod interrupts;
 pub mod process;
 #[path = "../scheduler/mod.rs"]
 pub mod scheduler;
+#[path = "../preempt/mod.rs"]
+pub mod preempt;
 #[path = "../syscall/mod.rs"]
 pub mod syscall;
 #[path = "../fs/mod.rs"]
@@ -25,6 +27,10 @@ pub mod fs;
 pub mod drivers;
 #[path = "../userspace/mod.rs"]
 pub mod userspace;
+#[path = "../shell/mod.rs"]
+pub mod shell;
+
+pub const SHELL_MODE: bool = true;
 
 // Inform the Limine bootloader about the protocol revision we support.
 // NOTE: Pin to revision 2, the highest the bundled Limine 7.13.3 supports.
@@ -95,47 +101,70 @@ pub extern "C" fn _start() -> ! {
     // Install IDT: CPU exceptions are caught; faulting tasks are terminated.
     interrupts::init_idt();
 
-    // ── Phase 6: Userspace Ecosystem ──────────────────────────────────────────
-    //
-    // Spawn user-space init task (Task 1) and pass it the root capability set.
-    // The root capability set here is the Serial capability with grant rights.
-    let mut cap_table_init = process::CapTable::new();
-    let _ = cap_table_init.insert(process::Capability {
-        resource: process::Resource::Serial,
-        read:  false,
-        write: true,
-        grant: true,     // init must hold grant to delegate it
-        sealed: false,
-        id: 0,           // stamped on insert
-        origin: None,    // root capability minted by the kernel
-    });
+    if SHELL_MODE {
+        interrupts::init_pic();
+        interrupts::init_pit(100); // 100 Hz
+        preempt::set_armed(false);
 
-    let init_task = userspace::spawn_init_task(process::TaskId(1), cap_table_init);
+        shell::load();
 
-    // Place tasks into the scheduler.
-    {
-        let mut sched = scheduler::SCHEDULER.lock();
-        sched.tasks[1] = Some(init_task);
+        println!("SHELL MODE active. Launching scheduler...");
+        unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
+        scheduler::yield_cpu();
+    } else {
+        // ── Phase 6: Userspace Ecosystem ──────────────────────────────────────────
+        //
+        // Spawn user-space init task (Task 1) and pass it the root capability set.
+        // The root capability set here is the Serial capability with grant rights.
+        let mut cap_table_init = process::CapTable::new();
+        let _ = cap_table_init.insert(process::Capability {
+            resource: process::Resource::Serial,
+            read:  false,
+            write: true,
+            grant: true,     // init must hold grant to delegate it
+            sealed: false,
+            id: 0,           // stamped on insert
+            origin: None,    // root capability minted by the kernel
+        });
+
+        let init_task = userspace::spawn_init_task(process::TaskId(1), cap_table_init);
+
+        // Place tasks into the scheduler.
+        {
+            let mut sched = scheduler::SCHEDULER.lock();
+            sched.tasks[1] = Some(init_task);
+        }
+
+        // Phase 7: load the stress / failure / scale harness alongside init.
+        load_phase7_harness();
+
+        // Phase 8: load the capability security / audit demonstration task.
+        load_phase8_demo();
+
+        // Phase 9: load the watchdog and the service it monitors/recovers.
+        load_phase9_watchdog();
+
+        // Phase 10: load the checkpoint/restore persistence demonstration.
+        load_phase10_persistence();
+
+        // Phase 10 (Parts 4-8): load the distribution / migration demonstration.
+        load_phase10_dist();
+
+        // Phase 11: preemptive scheduling. Bring up the PIC/PIT timer and load the
+        // preemption + IPC-atomicity demonstration. The timer starts only *counting*
+        // ticks; the demo driver arms involuntary preemption for a controlled window
+        // so the earlier phases keep their deterministic cooperative behavior.
+        interrupts::init_pic();
+        interrupts::init_pit(100); // 100 Hz
+        load_phase11_preempt();
+
+        println!("Microkernel tasks loaded. Launching scheduler...");
+
+        // Enable interrupts: the PIT now drives timer IRQs into `timer_isr`.
+        unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
+
+        scheduler::yield_cpu();
     }
-
-    // Phase 7: load the stress / failure / scale harness alongside init.
-    load_phase7_harness();
-
-    // Phase 8: load the capability security / audit demonstration task.
-    load_phase8_demo();
-
-    // Phase 9: load the watchdog and the service it monitors/recovers.
-    load_phase9_watchdog();
-
-    // Phase 10: load the checkpoint/restore persistence demonstration.
-    load_phase10_persistence();
-
-    // Phase 10 (Parts 4-8): load the distribution / migration demonstration.
-    load_phase10_dist();
-
-    println!("Microkernel tasks loaded. Launching scheduler...");
-
-    scheduler::yield_cpu();
 
     halt_loop()
 }
@@ -479,6 +508,287 @@ extern "C" fn task_dist_demo() -> ! {
     }
     process::dist::demo(1, process::TaskId(DIST_BACKING), process::TaskId(DIST_REPLICA));
     scheduler::terminate_current_task();
+}
+
+// ── Phase 11: preemptive scheduling + IPC validate→use atomicity ────────────────
+//
+// Two demonstrations, run by a single driver task after the cooperative phases
+// (7-10) have completed so their deterministic behavior is preserved:
+//
+//   A. Time-slicing proof. Two kernel tasks that *never* yield are made to run.
+//      Under the cooperative scheduler only the first could ever execute; under
+//      the timer both make progress, proving involuntary preemption is real.
+//
+//   B. The research finding. The IPC send path validates a capability and then,
+//      in a separate step, uses it (sys_send_typed: resolve_target @ipc.rs:183,
+//      then delivery @ipc.rs:199). Cooperative scheduling made that gap atomic
+//      for free. Here we open that exact window under preemption and let a
+//      modelled concurrent revoker run inside it (the deterministic adversary in
+//      `preempt`): the capability is valid at validation and GONE at use — a
+//      send on revoked authority. Then we wrap the same window in a
+//      non-preemptible region and show the revoker is deferred and the operation
+//      becomes atomic again.
+
+use core::sync::atomic::AtomicBool;
+
+// NOTE on slot choice: slots 120-122 are reused transiently by the Phase 8
+// security demo (syscall::phase8_security_demo) as scratch holders A/B/C, which
+// it then *nulls*. Phase 11 uses free slots in the 90s so its long-lived tasks
+// are never clobbered by another phase.
+const PREEMPT_DRIVER: usize = 90;
+const PREEMPT_BUSY_A: usize = 91;
+const PREEMPT_BUSY_B: usize = 92;
+const PREEMPT_VICTIM: usize = 93; // holds the capability under test
+const PREEMPT_SERVER: usize = 94; // the IPC target that capability authorizes
+
+/// Busy tasks wait on this until the driver arms preemption.
+static GO_BUSY: AtomicBool = AtomicBool::new(false);
+static BUSY_A_COUNT: AtomicUsize = AtomicUsize::new(0);
+static BUSY_B_COUNT: AtomicUsize = AtomicUsize::new(0);
+/// How many timer ticks each busy task runs for before exiting.
+const BUSY_TICK_BUDGET: u64 = 12;
+
+fn load_phase11_preempt() {
+    use process::{CapTable, Task, TaskId};
+    let mut sched = scheduler::SCHEDULER.lock();
+    sched.tasks[PREEMPT_DRIVER] =
+        Some(Task::new(TaskId(PREEMPT_DRIVER), task_preempt_demo, CapTable::new()));
+    sched.tasks[PREEMPT_BUSY_A] =
+        Some(Task::new(TaskId(PREEMPT_BUSY_A), task_busy_a, CapTable::new()));
+    sched.tasks[PREEMPT_BUSY_B] =
+        Some(Task::new(TaskId(PREEMPT_BUSY_B), task_busy_b, CapTable::new()));
+    // Container tasks: the victim holds the capability under test; the server is
+    // the target it authorizes. Neither needs to run, so each parks by exiting —
+    // a terminated task is never scheduled but its cap table remains readable.
+    sched.tasks[PREEMPT_VICTIM] =
+        Some(Task::new(TaskId(PREEMPT_VICTIM), task_park, CapTable::new()));
+    sched.tasks[PREEMPT_SERVER] =
+        Some(Task::new(TaskId(PREEMPT_SERVER), task_park, CapTable::new()));
+}
+
+extern "C" fn task_park() -> ! {
+    scheduler::terminate_current_task();
+}
+
+/// A compute task that never voluntarily yields. It runs until the global tick
+/// count advances by `BUSY_TICK_BUDGET` — progress it can only make if the timer
+/// is slicing it in and out. Increments a counter so the driver can prove it ran.
+extern "C" fn task_busy_a() -> ! {
+    while !GO_BUSY.load(Ordering::SeqCst) {
+        scheduler::yield_cpu();
+    }
+    // We may have been resumed from an interrupts-disabled context (e.g. a user
+    // task's syscall yield) while parked above. The measured loop never yields,
+    // so it relies entirely on the timer to make progress — explicitly enable
+    // interrupts so a tick can actually preempt us.
+    unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
+    let start = preempt::stats().ticks;
+    loop {
+        BUSY_A_COUNT.fetch_add(1, Ordering::Relaxed);
+        if preempt::stats().ticks.wrapping_sub(start) >= BUSY_TICK_BUDGET {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    scheduler::terminate_current_task();
+}
+
+extern "C" fn task_busy_b() -> ! {
+    while !GO_BUSY.load(Ordering::SeqCst) {
+        scheduler::yield_cpu();
+    }
+    unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
+    let start = preempt::stats().ticks;
+    loop {
+        BUSY_B_COUNT.fetch_add(1, Ordering::Relaxed);
+        if preempt::stats().ticks.wrapping_sub(start) >= BUSY_TICK_BUDGET {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    scheduler::terminate_current_task();
+}
+
+fn task_is_terminated(slot: usize) -> bool {
+    let sched = scheduler::SCHEDULER.lock();
+    match sched.get_task(process::TaskId(slot)) {
+        Some(t) => t.state == process::TaskState::Terminated,
+        None => true,
+    }
+}
+
+extern "C" fn task_preempt_demo() -> ! {
+    // 1. Let the cooperative phases (7-10) finish before arming preemption.
+    for _ in 0..40 {
+        scheduler::yield_cpu();
+    }
+
+    println!("[preempt] Phase 11: preemptive scheduling.");
+    let pre = preempt::stats();
+    println!(
+        "[preempt] timer mechanism live: {} ticks counted while unarmed (ISR runs, no switching).",
+        pre.ticks
+    );
+
+    // ── A. Time-slicing proof ────────────────────────────────────────────────
+    println!("[preempt] arming involuntary preemption; launching two compute tasks that never yield...");
+    preempt::set_armed(true);
+    GO_BUSY.store(true, Ordering::SeqCst);
+
+    // Wait for both busy tasks to finish (bounded so boot always completes).
+    let mut guard = 0u64;
+    loop {
+        if task_is_terminated(PREEMPT_BUSY_A) && task_is_terminated(PREEMPT_BUSY_B) {
+            break;
+        }
+        guard += 1;
+        if guard > 2_000_000 {
+            break;
+        }
+        scheduler::yield_cpu();
+    }
+
+    let a = BUSY_A_COUNT.load(Ordering::Relaxed);
+    let b = BUSY_B_COUNT.load(Ordering::Relaxed);
+    let st = preempt::stats();
+    if a > 0 && b > 0 && st.preemptions > 0 {
+        println!(
+            "[preempt] PASS: both compute tasks progressed under the timer alone (A={}, B={}); {} involuntary switches. Cooperative scheduling could never have run B.",
+            a, b, st.preemptions
+        );
+    } else {
+        println!(
+            "[preempt] FAIL: time-slicing (A={}, B={}, preemptions={}).",
+            a, b, st.preemptions
+        );
+    }
+
+    // ── B. IPC validate→use atomicity ────────────────────────────────────────
+    ipc_toctou_experiment();
+
+    preempt::set_armed(false);
+    let fin = preempt::stats();
+    println!(
+        "[preempt] disarmed. totals: {} ticks, {} involuntary switches, {} deferred (non-preemptible/lock-held).",
+        fin.ticks, fin.preemptions, fin.deferred
+    );
+    scheduler::terminate_current_task();
+}
+
+/// Installs the capability under test into the victim's table and returns its
+/// (slot, id). It is an IpcChannel authorizing a send to the server task — the
+/// exact resource kind `resolve_target` validates in the real send path.
+fn install_victim_cap() -> (usize, u64) {
+    use process::{Capability, Resource, TaskId};
+    let mut sched = scheduler::SCHEDULER.lock();
+    let t = sched.get_task_mut(TaskId(PREEMPT_VICTIM)).unwrap();
+    let _ = t.cap_table.kernel_revoke(0); // clear any prior occupant of slot 0
+    let slot = t
+        .cap_table
+        .insert(Capability {
+            resource: Resource::IpcChannel { target_task: TaskId(PREEMPT_SERVER) },
+            read: true,
+            write: true,
+            grant: false,
+            sealed: false,
+            id: 0,
+            origin: None,
+        })
+        .unwrap();
+    let id = t.cap_table.get(slot).unwrap().id;
+    (slot, id)
+}
+
+/// Reads back the id of the capability in `slot`, or `None` if it is gone.
+fn victim_cap_id(slot: usize) -> Option<u64> {
+    let sched = scheduler::SCHEDULER.lock();
+    let t = sched.get_task(process::TaskId(PREEMPT_VICTIM))?;
+    t.cap_table.get(slot).map(|c| c.id)
+}
+
+/// Spins (without yielding) until at least one timer tick lands inside the
+/// currently-open IPC window, or a bound is hit. Returns the window-tick count.
+/// Because it never yields, only the timer advances `window_ticks`.
+fn spin_until_window_tick() -> u64 {
+    let mut spins = 0u64;
+    while preempt::stats().window_ticks == 0 && spins < 200_000_000 {
+        spins += 1;
+        core::hint::spin_loop();
+    }
+    preempt::stats().window_ticks
+}
+
+fn ipc_toctou_experiment() {
+    // The experiment depends on timer ticks landing inside the window, so the
+    // driver must run with interrupts enabled (it may have been resumed from an
+    // IF=0 context during the wait loop above).
+    unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
+    println!("[preempt] IPC validate->use atomicity (models sys_send_typed: resolve_target @ipc.rs:183 then use @ipc.rs:199):");
+
+    // ── Vulnerable: the validate→use window is preemptible ───────────────────
+    let (slot, _id) = install_victim_cap();
+    preempt::arm_adversary(PREEMPT_VICTIM, slot);
+    preempt::reset_window_ticks();
+
+    // VALIDATE: authority is checked here (capability present).
+    let validated = victim_cap_id(slot);
+
+    // Open the exact gap between validation and use, then let a tick land — a
+    // tick we permit to act, modelling a concurrent revoker task being scheduled.
+    preempt::enter_ipc_window();
+    let wt_vuln = spin_until_window_tick();
+    preempt::exit_ipc_window();
+
+    // USE: the resolved target would now be used to deliver. Re-read the table.
+    let at_use = victim_cap_id(slot);
+    let fired = preempt::adversary_fired_in_window();
+
+    match (validated, at_use) {
+        (Some(v), None) if fired => {
+            println!(
+                "[preempt]   VULNERABLE: validated on cap id={}; {} tick(s) landed in the window and a revoker ran; at USE the capability is GONE.",
+                v, wt_vuln
+            );
+            println!("[preempt]   -> a naive send delivers on revoked authority. The check and the use were never atomic.");
+        }
+        _ => {
+            println!(
+                "[preempt]   VULNERABLE: race did not land this run (validated={:?}, at_use={:?}, fired={}).",
+                validated, at_use, fired
+            );
+        }
+    }
+
+    // ── Guarded: the same window is non-preemptible ──────────────────────────
+    let (slot2, _id2) = install_victim_cap();
+    preempt::arm_adversary(PREEMPT_VICTIM, slot2);
+    preempt::reset_window_ticks();
+
+    preempt::enter_critical(); // make validate→use a non-preemptible region
+    let validated2 = victim_cap_id(slot2);
+    preempt::enter_ipc_window();
+    let wt_guard = spin_until_window_tick(); // ticks still LAND...
+    preempt::exit_ipc_window();
+    let at_use2 = victim_cap_id(slot2);
+    preempt::exit_critical();
+    let fired2 = preempt::adversary_fired_in_window();
+
+    match (validated2, at_use2) {
+        (Some(v), Some(u)) if v == u && !fired2 => {
+            println!(
+                "[preempt]   GUARDED: {} tick(s) still LANDED in the window, but the revoker was deferred (preempt-count>0); cap id={} intact at use.",
+                wt_guard, u
+            );
+            println!("[preempt] PASS: a non-preemptible validate->use region restores capability atomicity under preemption.");
+        }
+        _ => {
+            println!(
+                "[preempt]   GUARDED: unexpected (validated={:?}, at_use={:?}, fired={}).",
+                validated2, at_use2, fired2
+            );
+        }
+    }
+    preempt::disarm_adversary();
 }
 
 /// Panic handler.

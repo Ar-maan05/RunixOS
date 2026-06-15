@@ -62,6 +62,10 @@ pub fn terminate_current_task() -> ! {
     let mut new_kstack_top: usize = 0;
     let mut new_cr3: usize = 0;
 
+    unsafe {
+        core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
+    }
+
     {
         let mut sched = SCHEDULER.lock();
         let max_tasks = crate::process::MAX_TASKS;
@@ -131,9 +135,95 @@ pub fn terminate_current_task() -> ! {
     }
 }
 
+/// Involuntary reschedule, driven by the timer ISR (Phase 11).
+///
+/// Mirrors the *selection* half of [`yield_cpu`], but with two differences that
+/// make it safe to run from interrupt context on a single core:
+///
+///   1. It acquires the scheduler lock with `try_lock`. If the interrupted task
+///      was already holding it (mid-IPC, mid-spawn, …), we must not spin — that
+///      would deadlock the core. We defer the preemption to a later tick.
+///   2. The current task is left `Ready` (it was `Running` and is merely being
+///      time-sliced out), never blocked.
+///
+/// The switch itself reuses the cooperative `switch_context`, so the preempted
+/// task's resume frame is identical to a voluntarily-yielded one.
+pub fn preempt_reschedule() {
+    let mut old_rsp_ptr: *mut usize = core::ptr::null_mut();
+    let mut new_rsp_val: usize = 0;
+    let mut new_kstack_top: usize = 0;
+    let mut new_cr3: usize = 0;
+
+    {
+        let mut sched = match SCHEDULER.try_lock() {
+            Some(g) => g,
+            None => {
+                // Interrupted code holds the scheduler lock: defer, don't deadlock.
+                crate::preempt::note_deferred_locked();
+                return;
+            }
+        };
+        let max_tasks = crate::process::MAX_TASKS;
+
+        let curr_idx = match sched.current_task_id {
+            Some(id) if id.0 < max_tasks && sched.tasks[id.0].is_some() => id.0,
+            _ => return,
+        };
+
+        let start = (curr_idx + 1) % max_tasks;
+        let mut next_idx = None;
+        for offset in 0..max_tasks {
+            let idx = (start + offset) % max_tasks;
+            if let Some(ref t) = sched.tasks[idx] {
+                if t.state == TaskState::Ready {
+                    next_idx = Some(idx);
+                    break;
+                }
+            }
+        }
+
+        let next = match next_idx {
+            Some(n) if n != curr_idx => n,
+            _ => return, // nothing else ready: keep running the current task
+        };
+
+        if sched.tasks[curr_idx].as_ref().unwrap().state == TaskState::Running {
+            sched.tasks[curr_idx].as_mut().unwrap().state = TaskState::Ready;
+        }
+        sched.tasks[next].as_mut().unwrap().state = TaskState::Running;
+
+        old_rsp_ptr = &mut sched.tasks[curr_idx].as_mut().unwrap().rsp as *mut usize;
+        new_rsp_val = sched.tasks[next].as_ref().unwrap().rsp;
+        new_kstack_top = sched.tasks[next].as_ref().unwrap().kstack_top;
+        new_cr3 = sched.tasks[next].as_ref().unwrap().cr3;
+        sched.current_task_id = Some(sched.tasks[next].as_ref().unwrap().id);
+    }
+
+    if !old_rsp_ptr.is_null() && new_rsp_val != 0 {
+        if new_kstack_top != 0 {
+            crate::arch::gdt::set_kernel_stack(new_kstack_top as u64);
+        }
+        if new_cr3 != 0 {
+            crate::memory::switch_address_space(new_cr3);
+        }
+        crate::preempt::note_preemption();
+        unsafe {
+            switch_context(old_rsp_ptr, new_rsp_val as *const usize);
+        }
+    }
+}
+
 /// Yields the CPU to the next scheduled task.
 /// Implements cooperative context switching.
 pub fn yield_cpu() {
+    // Disable interrupts and save previous state
+    let interrupts_enabled = unsafe {
+        let rflags: usize;
+        core::arch::asm!("pushfq; pop {}", out(reg) rflags);
+        core::arch::asm!("cli");
+        (rflags & 0x200) != 0
+    };
+
     let mut current_idx = None;
     let mut next_idx = None;
 
@@ -204,7 +294,7 @@ pub fn yield_cpu() {
 
                 // Use static dummy area to write the initial boot context's stack pointer
                 static mut BOOT_RSP: usize = 0;
-                old_rsp_ptr = unsafe { &mut BOOT_RSP as *mut usize };
+                old_rsp_ptr = unsafe { &raw mut BOOT_RSP as *mut usize };
             }
         }
     }
@@ -222,6 +312,13 @@ pub fn yield_cpu() {
         }
         unsafe {
             switch_context(old_rsp_ptr, new_rsp_val as *const usize);
+        }
+    }
+
+    // Restore interrupts if they were enabled
+    if interrupts_enabled {
+        unsafe {
+            core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
         }
     }
 }

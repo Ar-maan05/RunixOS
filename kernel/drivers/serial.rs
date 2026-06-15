@@ -39,6 +39,24 @@ impl<T> Spinlock<T> {
             },
         }
     }
+
+    /// Non-blocking acquire. Returns `None` if the lock is already held.
+    ///
+    /// Required by the preemption layer: a timer ISR must never *spin* on the
+    /// scheduler lock — if the interrupted code holds it, spinning would
+    /// deadlock the single core. The ISR uses this to detect that case and
+    /// defer the preemption instead.
+    pub fn try_lock(&self) -> Option<SpinlockGuard<'_, T>> {
+        if self.lock.swap(true, Ordering::Acquire) {
+            return None;
+        }
+        Some(SpinlockGuard {
+            lock: &self.lock,
+            // SAFETY: identical to `lock`; we won the atomic swap so we hold
+            // exclusive access until the returned guard is dropped.
+            data: unsafe { &mut *self.data.get() },
+        })
+    }
 }
 
 pub struct SpinlockGuard<'a, T> {
@@ -86,7 +104,7 @@ impl SerialPort {
             //   subsystems are yet mapping or interacting with these ports.
             outb(self.port + 1, 0x00); // Disable all interrupts
             outb(self.port + 3, 0x80); // Enable DLAB (set divisor)
-            outb(self.port + 0, 0x03); // Set divisor to 3 (38400 baud)
+            outb(self.port + 0, 0x01); // Set divisor to 1 (115200 baud)
             outb(self.port + 1, 0x00); // High byte of divisor
             outb(self.port + 3, 0x03); // 8 bits, no parity, one stop bit
             outb(self.port + 2, 0xC7); // Enable FIFO, clear, 14-byte threshold
@@ -123,6 +141,43 @@ impl SerialPort {
                 self.send(b'\r');
             }
             self.send(byte);
+        }
+    }
+
+    /// Returns a byte if one is waiting in the receive buffer, else None.
+    /// LSR is at base+5; bit 0 (Data Ready) set => a byte is in RBR (base+0).
+    pub fn try_read(&self) -> Option<u8> {
+        unsafe {
+            if (inb(self.port + 5) & 1) == 0 { return None; }
+            Some(inb(self.port + 0))
+        }
+    }
+}
+
+/// Blocking single-byte read. Yields the CPU between polls so other tasks run.
+pub fn read_byte() -> u8 {
+    loop {
+        let b = {
+            let guard = SERIAL1.lock();
+            guard.try_read()
+        };
+        if let Some(val) = b { return val; }
+        crate::scheduler::yield_cpu();
+    }
+}
+
+/// Reads one line into `buf` (no trailing newline). Echoes typed characters.
+/// Editing: handle '\b' (0x08) and DEL (0x7F) as backspace. Terminators: '\n'
+/// (0x0A) or '\r' (0x0D). Returns the number of bytes stored. Caps at buf.len().
+pub fn read_line(buf: &mut [u8]) -> usize {
+    let mut n = 0;
+    loop {
+        let b = read_byte();
+        match b {
+            b'\n' | b'\r' => { crate::print!("\r\n"); return n; }
+            0x08 | 0x7F => { if n > 0 { n -= 1; crate::print!("\x08 \x08"); } }
+            0x20..=0x7E => { if n < buf.len() { buf[n] = b; n += 1; crate::print!("{}", b as char); } }
+            _ => {} // ignore control bytes
         }
     }
 }
@@ -169,9 +224,17 @@ pub static SERIAL1: Spinlock<SerialPort> = Spinlock::new(SerialPort::new(0x3F8))
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use fmt::Write;
-    // We lock the serial port to prevent interleaved output.
-    let mut serial = SERIAL1.lock();
-    serial.write_fmt(args).unwrap();
+    // Phase 11: prints run in a non-preemptible region. A timer tick that
+    // switched tasks while this core held the serial lock would leave another
+    // task spinning on it; raising the preempt count makes the tick defer until
+    // the lock is released, keeping serial output a clean critical section.
+    crate::preempt::enter_critical();
+    {
+        // We lock the serial port to prevent interleaved output.
+        let mut serial = SERIAL1.lock();
+        serial.write_fmt(args).unwrap();
+    }
+    crate::preempt::exit_critical();
 }
 
 /// Prints to the serial console.

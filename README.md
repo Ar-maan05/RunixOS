@@ -5,7 +5,7 @@
 [![Rust](https://img.shields.io/badge/Rust-nightly-orange)](#)
 [![Architecture](https://img.shields.io/badge/Architecture-x86__64-blue)](#)
 [![Boot](https://img.shields.io/badge/Boot-UEFI%20%2B%20Limine-green)](#)
-[![Status](https://img.shields.io/badge/Status-Phases%200--9%20Complete-success)](#)
+[![Status](https://img.shields.io/badge/Status-Phases%200--11%20%2B%20Console-success)](#)
 [![License](https://img.shields.io/badge/License-MIT-yellow)](#)
 
 RunixOS is an experimental operating system that explores what modern systems software might look like if capabilities, message passing, and persistence were treated as first-class principles from the beginning.
@@ -114,10 +114,85 @@ Everything else lives in user space.
 * ✅ Phase 7: Stress, scale, and failure testing
 * ✅ Phase 8: Security and capability maturity
 * ✅ Phase 9: Stability and self-sufficiency
+* ✅ Phase 10: Distributed persistence and service migration (in-memory; boot-verified)
+* ✅ Phase 11: Preemptive scheduling and capability validate→use atomicity
+* ✅ Interactive Console: live capability-gated shell over the real kernel paths
 
-### Experimental
+### Experimental / simulated
 
-* ⚠️ Phase 10: Distributed persistence and service migration
+* ⚠️ Phase 10 distribution uses simulated in-kernel nodes (no NIC); persistence is
+  in-memory (not durable across reboot).
+* ⚠️ Ring-3 tasks are not yet preemptible (they run with interrupts disabled);
+  Phase 11 preemption applies to ring-0 tasks.
+
+---
+
+## Highlight: capability validate→use atomicity (Phase 11)
+
+Adding preemptive scheduling (PIT timer, full-register context switch) surfaced a
+finding the cooperative scheduler had hidden: **capability *validation* and
+capability *use* were never atomic — cooperative scheduling was silently
+donating that atomicity for free.** An IPC send validates a capability, then (in
+a separate step) uses it to deliver. Under preemption a concurrent task can
+revoke the capability in the gap, so the send delivers on revoked authority — a
+classic TOCTOU.
+
+The fix is now a system property: `ipc::sys_send_typed` / `sys_send_async` wrap
+validate→use in a **non-preemptible critical section** (`preempt::CriticalWindow`)
+that extends past *both* halves of delivery (message deposited **and** receiver
+marked runnable), with the blocking wait deliberately outside it and a fresh
+re-validation on every wakeup. The console reproduces both sides live:
+
+```
+runix> sched preempt-race
+[VULN]  validated id=5; revoker ran mid-window; cap GONE at use
+[PASS]  non-preemptible region: tick landed but revoker deferred; cap intact
+```
+
+---
+
+## Interactive Console
+
+RunixOS ships a live, capability-gated **interactive console** that drives the
+real kernel paths — every command exercises an actual subsystem, not a
+simulation. It is the single end-to-end demonstration of Phases 1–11.
+
+Enable it via `SHELL_MODE` in `kernel/boot/main.rs` (default `true`), then build
+and run and type at the `runix> ` prompt over the serial line:
+
+```bash
+./build_disk.sh && ./run.sh
+```
+
+```
+runix> cap list
+[OK]    slot 0: id=1 Serial r=false w=true g=true sealed=false origin=None
+[INFO]  no ambient authority: 3 capabilities, nothing else reachable
+runix> sched timeslice
+[PASS]  time-sliced: A=2938800 B=2972002 preemptions=201; cooperative could not run B
+runix> fault spawn
+[FAULT] page fault (#PF) in task 71 ... -> terminating task, kernel continues.
+[OK]    task 71 faulted (#PF) and was contained; kernel + 1 tasks alive
+runix> migrate 1 1
+[PASS]  service 1 migrated node0->node1, capability stable
+```
+
+| Group | Commands | Validates |
+|---|---|---|
+| Capability | `cap list / grant / revoke / seal / audit` | Phase 1, 3, 8 |
+| IPC | `ipc send / typed / stress` | Phase 1, 5, 7 |
+| Scheduler | `sched info / timeslice / preempt-race` | Phase 11 |
+| Fault | `fault spawn / cascade` | Phase 4 |
+| Services | `service list / restart` | Phase 6, 9 |
+| Persistence | `checkpoint / restore / migrate` | Phase 10 |
+
+**Full command reference:** [`kernel/docs/console.md`](kernel/docs/console.md).
+**Implementation spec:** [`CONSOLE_SPEC.md`](CONSOLE_SPEC.md).
+
+> The console is a ring-0 kernel task and renders over COM1 serial (the QEMU
+> window is blank by design under UEFI). When scripting it headlessly, feed one
+> command at a time — the 16-byte UART FIFO drops bulk input. See the console
+> reference for the pacing pattern.
 
 ---
 
@@ -175,23 +250,28 @@ The graphical display is intentionally blank. All diagnostics are emitted throug
 
 ```text
 kernel/
-├── arch/x86_64/
-├── boot/
-├── docs/
-├── drivers/
+├── arch/x86_64/      # GDT/TSS, low-level CPU setup
+├── boot/             # entry point, task loading, SHELL_MODE wiring
+├── docs/             # architecture.md, console.md
+├── drivers/          # serial (COM1 TX/RX), spinlock
 ├── fs/
-├── interrupts/
-├── memory/
-├── process/
-├── scheduler/
-├── syscall/
+├── interrupts/       # IDT, fault handlers, PIC/PIT timer (Phase 11)
+├── memory/           # frame allocator, paging, address spaces
+├── preempt/          # Phase 11: preemption policy, non-preemptible regions
+├── process/          # tasks, capabilities, IPC, snapshot, distribution, audit
+├── scheduler/        # round-robin + preemptive reschedule
+├── shell/            # interactive console
+├── syscall/          # int 0x80 dispatch, capability syscalls
 ├── tests/
-└── userspace/
+└── userspace/        # ring-3 position-independent service blobs
 ```
 
-The complete phase-by-phase design directive is available in `OS_PLAN.md`.
+Documentation:
 
-The detailed implementation reference is available in `kernel/docs/architecture.md`.
+* `OS_PLAN.md` — the complete phase-by-phase design directive.
+* `kernel/docs/architecture.md` — detailed implementation reference.
+* `kernel/docs/console.md` — interactive console command reference.
+* `CONSOLE_SPEC.md` — console implementation specification.
 
 ---
 

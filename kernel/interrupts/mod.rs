@@ -202,6 +202,133 @@ extern "C" {
     pub fn page_fault_entry();
 }
 
+// ── Phase 11: timer interrupt (preemptive scheduling) ───────────────────────
+//
+// The timer ISR must save the *full* general-purpose register file, not just
+// the callee-saved set the cooperative switch handles. A timer fires at an
+// arbitrary instruction, so the interrupted task never reached a call boundary
+// where the System V ABI would have spilled its caller-saved registers; if we
+// clobber them the task resumes corrupted. So the stub below pushes all 15 GP
+// registers, then calls into Rust. The actual task switch (when the policy in
+// `timer_isr` decides to preempt) reuses the *cooperative* `switch_context`: it
+// saves this stack's rsp into the task and loads the next task's. Because both
+// voluntary yields and timer preemptions leave a `switch_context` frame on top
+// of a suspended task's stack, the two paths unify — a preempted task is
+// resumed exactly like one that yielded, and on its way back out this stub
+// restores the full register file and `iretq`s to the interrupted instruction.
+
+core::arch::global_asm!(
+    ".global timer_interrupt_entry",
+    "timer_interrupt_entry:",
+    "    push rax",
+    "    push rcx",
+    "    push rdx",
+    "    push rsi",
+    "    push rdi",
+    "    push r8",
+    "    push r9",
+    "    push r10",
+    "    push r11",
+    "    push rbx",
+    "    push rbp",
+    "    push r12",
+    "    push r13",
+    "    push r14",
+    "    push r15",
+    "    call timer_isr",
+    "    pop r15",
+    "    pop r14",
+    "    pop r13",
+    "    pop r12",
+    "    pop rbp",
+    "    pop rbx",
+    "    pop r11",
+    "    pop r10",
+    "    pop r9",
+    "    pop r8",
+    "    pop rdi",
+    "    pop rsi",
+    "    pop rdx",
+    "    pop rcx",
+    "    pop rax",
+    "    iretq",
+);
+
+extern "C" {
+    fn timer_interrupt_entry();
+}
+
+const PIC1_CMD: u16 = 0x20;
+const PIC1_DATA: u16 = 0x21;
+const PIC2_CMD: u16 = 0xA0;
+const PIC2_DATA: u16 = 0xA1;
+const PIC_EOI: u8 = 0x20;
+
+/// Timer interrupt is delivered on PIC vector base + IRQ0.
+pub const TIMER_VECTOR: usize = 0x20;
+
+unsafe fn outb(port: u16, val: u8) {
+    core::arch::asm!("out dx, al", in("dx") port, in("al") val, options(nomem, nostack, preserves_flags));
+}
+
+/// Remaps the legacy 8259 PIC pair so hardware IRQs land on vectors 0x20-0x2F
+/// (out of the way of the CPU exception vectors), then masks every line except
+/// IRQ0 (the PIT). Without the remap, IRQ0 would alias vector 8 (#DF).
+pub fn init_pic() {
+    unsafe {
+        // ICW1: begin init, expect ICW4.
+        outb(PIC1_CMD, 0x11);
+        outb(PIC2_CMD, 0x11);
+        // ICW2: vector offsets.
+        outb(PIC1_DATA, 0x20);
+        outb(PIC2_DATA, 0x28);
+        // ICW3: master/slave wiring (slave on IRQ2).
+        outb(PIC1_DATA, 0x04);
+        outb(PIC2_DATA, 0x02);
+        // ICW4: 8086 mode.
+        outb(PIC1_DATA, 0x01);
+        outb(PIC2_DATA, 0x01);
+        // Masks: unmask only IRQ0 on the master; mask everything else.
+        outb(PIC1_DATA, 0xFE);
+        outb(PIC2_DATA, 0xFF);
+    }
+}
+
+/// Programs PIT channel 0 to fire IRQ0 at `hz` Hz in square-wave mode.
+pub fn init_pit(hz: u32) {
+    let divisor: u32 = 1_193_182 / hz;
+    let div = divisor as u16;
+    unsafe {
+        // Channel 0, lobyte/hibyte, mode 3 (square wave).
+        outb(0x43, 0x36);
+        outb(0x40, (div & 0xFF) as u8);
+        outb(0x40, (div >> 8) as u8);
+    }
+}
+
+/// Signals end-of-interrupt to the master PIC (IRQ0 lives on the master).
+#[inline]
+pub fn pic_eoi() {
+    unsafe { outb(PIC1_CMD, PIC_EOI); }
+}
+
+/// The Rust half of the timer interrupt, called by `timer_interrupt_entry` with
+/// the full register file already on the stack. Acks the PIC, then asks the
+/// preemption policy whether to switch; if so, performs an involuntary
+/// reschedule via the cooperative switch machinery.
+#[no_mangle]
+pub extern "C" fn timer_isr() {
+    // Ack immediately so the next tick can be delivered after we `iretq`.
+    pic_eoi();
+
+    if crate::preempt::on_tick_should_switch() {
+        // `preempt_reschedule` uses `try_lock`; if the interrupted code holds
+        // the scheduler lock it returns without switching (deferred), avoiding
+        // the single-core deadlock that a blocking lock would cause here.
+        crate::scheduler::preempt_reschedule();
+    }
+}
+
 /// Installs the IDT and points the CPU at it.
 pub fn init_idt() {
     let cs = current_cs();
@@ -211,6 +338,9 @@ pub fn init_idt() {
     set_handler(8, double_fault_handler as *const () as u64, cs);
     set_handler(13, general_protection_entry as *const () as u64, cs);
     set_handler(14, page_fault_entry as *const () as u64, cs);
+
+    // Phase 11: timer interrupt (IRQ0 -> vector 0x20) for preemptive scheduling.
+    set_handler(TIMER_VECTOR, timer_interrupt_entry as *const () as u64, cs);
 
     // Syscall trap: reachable from ring 3 (DPL=3).
     set_handler_dpl(0x80, crate::syscall::syscall_entry as *const () as u64, cs, 3);
