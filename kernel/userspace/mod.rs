@@ -1,9 +1,9 @@
 // RunixOS user-space support.
 //
-// Phase 2 has no ELF loader yet, so the demo "user program" is a small
+// The system has no ELF loader yet, so the demo user program is a small
 // position-independent code blob assembled into the kernel image. We copy it
-// into a fresh user-accessible page and run it in ring 3. It does nothing but
-// invoke syscalls (`int 0x80`) in a loop, proving the ring 3 -> ring 0 -> ring 3
+// into a fresh user-accessible page and run it as a ring-3 task. It does nothing but
+// invoke syscalls (`int 0x80`) in a loop, proving the ring-3 task to ring-0 kernel to ring-3 task
 // round trip and that the kernel routes user requests.
 
 use crate::memory::{self, FRAME_ALLOCATOR};
@@ -185,7 +185,7 @@ pub fn spawn_logger_task(id: TaskId, cap_table: CapTable) -> Task {
     spawn_user(id, &raw const logger_blob_start, &raw const logger_blob_end, cap_table)
 }
 
-/// Spawns the faulty user task that tests Phase 4 isolation, revocation, and validation.
+/// Spawns the faulty user task that tests isolation, revocation, and validation.
 pub fn spawn_faulty_user_task(id: TaskId, cap_table: CapTable) -> Task {
     spawn_user(id, &raw const faulty_user_blob_start, &raw const faulty_user_blob_end, cap_table)
 }
@@ -400,4 +400,24 @@ pub fn spawn_ramfs_task(id: TaskId, cap_table: CapTable) -> Task {
 
 pub fn spawn_init_task(id: TaskId, cap_table: CapTable) -> Task {
     spawn_user(id, &raw const init_blob_start, &raw const init_blob_end, cap_table)
+}
+
+core::arch::global_asm!(
+    ".global preempt_user_blob_start",
+    ".global preempt_user_blob_end",
+    "preempt_user_blob_start:",
+    "    mov rcx, 0",
+    "100:",
+    "    add rcx, 1",
+    "    jmp 100b",
+    "preempt_user_blob_end:",
+);
+
+extern "C" {
+    static preempt_user_blob_start: u8;
+    static preempt_user_blob_end: u8;
+}
+
+pub fn spawn_preempt_user_task(id: TaskId, cap_table: CapTable) -> Task {
+    spawn_user(id, &raw const preempt_user_blob_start, &raw const preempt_user_blob_end, cap_table)
 }

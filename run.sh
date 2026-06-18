@@ -18,6 +18,7 @@ echo "--------------------------------------------------------"
 # We also forward any additional CLI arguments.
 qemu-system-x86_64 \
     -M q35 \
+    -smp 2 \
     -drive if=pflash,unit=0,format=raw,file=/usr/share/OVMF/OVMF_CODE.fd,readonly=on \
     -drive file=disk.img,format=raw,media=disk \
     -serial stdio \

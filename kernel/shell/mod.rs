@@ -1,42 +1,42 @@
-use crate::process::{self, Task, TaskId, CapTable, Capability, TaskState};
+use crate::process::{self, Task, TaskId, CapTable, Capability, TaskState, IpcError};
 use crate::process::capability::{Resource, RightsMask, MAX_CAPS};
 use crate::scheduler;
 use crate::preempt;
-use core::sync::atomic::{AtomicU64, Ordering, AtomicBool, AtomicUsize};
+use core::sync::atomic::{AtomicU64, Ordering, AtomicBool, AtomicUsize, AtomicU8};
 
 macro_rules! print_cmd {
     ($($arg:tt)*) => {
-        crate::print!("\x1b[0m[CMD]   {}\x1b[0m\n", format_args!($($arg)*));
+        crate::print!("\x1b[0m[CMD]   {}\x1b[0m\n", format_args!($($arg)*))
     };
 }
 macro_rules! print_ok {
     ($($arg:tt)*) => {
-        crate::print!("\x1b[32m[OK]    {}\x1b[0m\n", format_args!($($arg)*));
+        crate::print!("\x1b[32m[OK]    {}\x1b[0m\n", format_args!($($arg)*))
     };
 }
 macro_rules! print_fail {
     ($($arg:tt)*) => {
-        crate::print!("\x1b[31m[FAIL]  {}\x1b[0m\n", format_args!($($arg)*));
+        crate::print!("\x1b[31m[FAIL]  {}\x1b[0m\n", format_args!($($arg)*))
     };
 }
 macro_rules! print_pass {
     ($($arg:tt)*) => {
-        crate::print!("\x1b[36m[PASS]  {}\x1b[0m\n", format_args!($($arg)*));
+        crate::print!("\x1b[36m[PASS]  {}\x1b[0m\n", format_args!($($arg)*))
     };
 }
 macro_rules! print_vuln {
     ($($arg:tt)*) => {
-        crate::print!("\x1b[33m[VULN]  {}\x1b[0m\n", format_args!($($arg)*));
+        crate::print!("\x1b[33m[VULN]  {}\x1b[0m\n", format_args!($($arg)*))
     };
 }
 macro_rules! print_info {
     ($($arg:tt)*) => {
-        crate::print!("\x1b[37m[INFO]  {}\x1b[0m\n", format_args!($($arg)*));
+        crate::print!("\x1b[37m[INFO]  {}\x1b[0m\n", format_args!($($arg)*))
     };
 }
 macro_rules! print_warn {
     ($($arg:tt)*) => {
-        crate::print!("\x1b[33m[WARN]  {}\x1b[0m\n", format_args!($($arg)*));
+        crate::print!("\x1b[33m[WARN]  {}\x1b[0m\n", format_args!($($arg)*))
     };
 }
 
@@ -148,6 +148,67 @@ pub fn root_caps() -> CapTable {
         origin: None,
     });
 
+    // slot 10: FsNode mount 0 (read/write)
+    let _ = caps.insert(Capability {
+        resource: Resource::FsNode { mount: 0, readable: true, writable: true },
+        read: true,
+        write: true,
+        grant: true,
+        sealed: false,
+        id: 0,
+        origin: None,
+    });
+    // slot 11: IpcChannel to FS Service (task 84)
+    let _ = caps.insert(Capability {
+        resource: Resource::IpcChannel { target_task: TaskId(84) },
+        read: true,
+        write: true,
+        grant: true,
+        sealed: false,
+        id: 0,
+        origin: None,
+    });
+    // slot 12: Device 0 (serial)
+    let _ = caps.insert(Capability {
+        resource: Resource::Device { id: 0, readable: true, writable: true },
+        read: true,
+        write: true,
+        grant: true,
+        sealed: false,
+        id: 0,
+        origin: None,
+    });
+    // slot 13: Device 1 (keyboard)
+    let _ = caps.insert(Capability {
+        resource: Resource::Device { id: 1, readable: true, writable: true },
+        read: true,
+        write: true,
+        grant: true,
+        sealed: false,
+        id: 0,
+        origin: None,
+    });
+    // slot 14: IpcChannel to Device Service (task 85)
+    let _ = caps.insert(Capability {
+        resource: Resource::IpcChannel { target_task: TaskId(85) },
+        read: true,
+        write: true,
+        grant: true,
+        sealed: false,
+        id: 0,
+        origin: None,
+    });
+    // slot 15: IpcChannel to Sync Service (task 86)
+    let _ = caps.insert(Capability {
+        resource: Resource::IpcChannel { target_task: TaskId(86) },
+        read: true,
+        write: true,
+        grant: true,
+        sealed: false,
+        id: 0,
+        origin: None,
+    });
+
     caps
 }
 
@@ -218,6 +279,544 @@ fn tokenize<'a>(line: &'a [u8], tokens: &mut [Option<&'a [u8]>; 4]) -> usize {
     count
 }
 
+fn send_fs_msg(op: u8, mount: u8, path: &[u8], data: &[u8]) -> Result<[u8; 128], IpcError> {
+    ensure_fs_service();
+    let mut cap_idx = None;
+    {
+        let slots = get_shell_caps();
+        for (i, slot_opt) in slots.iter().enumerate() {
+            if let Some(cap) = slot_opt {
+                if let Resource::IpcChannel { target_task } = cap.resource {
+                    if target_task.0 == 84 {
+                        cap_idx = Some(i);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    let cap_idx = match cap_idx {
+        Some(idx) => idx,
+        None => return Err(IpcError::NoCapability),
+    };
+    
+    let mut payload = [0u8; 128];
+    payload[0] = op;
+    payload[1] = mount;
+    let name_len = core::cmp::min(path.len(), 30);
+    payload[2] = name_len as u8;
+    payload[3..3 + name_len].copy_from_slice(&path[..name_len]);
+    
+    let data_len = core::cmp::min(data.len(), 94);
+    payload[33] = data_len as u8;
+    payload[34..34 + data_len].copy_from_slice(&data[..data_len]);
+    
+    process::ipc::sys_send_typed(cap_idx, process::IpcTag::FsOp as u16, 1, &payload)?;
+    let reply = process::ipc::sys_receive_typed()?;
+    if reply.tag != process::IpcTag::FsReply {
+        return Err(IpcError::InvalidTag);
+    }
+    Ok(reply.payload)
+}
+
+fn send_dev_msg(op: u8, dev_id: u8, data: &[u8]) -> Result<[u8; 128], IpcError> {
+    ensure_device_service();
+    let mut cap_idx = None;
+    {
+        let slots = get_shell_caps();
+        for (i, slot_opt) in slots.iter().enumerate() {
+            if let Some(cap) = slot_opt {
+                if let Resource::IpcChannel { target_task } = cap.resource {
+                    if target_task.0 == 85 {
+                        cap_idx = Some(i);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    let cap_idx = match cap_idx {
+        Some(idx) => idx,
+        None => return Err(IpcError::NoCapability),
+    };
+    
+    let mut payload = [0u8; 128];
+    payload[0] = op;
+    payload[1] = dev_id;
+    let write_len = core::cmp::min(data.len(), 120);
+    payload[2] = write_len as u8;
+    payload[3..3 + write_len].copy_from_slice(&data[..write_len]);
+    
+    process::ipc::sys_send_typed(cap_idx, process::IpcTag::DevOp as u16, 1, &payload)?;
+    let reply = process::ipc::sys_receive_typed()?;
+    if reply.tag != process::IpcTag::DevReply {
+        return Err(IpcError::InvalidTag);
+    }
+    Ok(reply.payload)
+}
+
+fn send_sync_msg(op: u8, obj_id: u8, is_mutex: u8, count: u8) -> Result<[u8; 128], IpcError> {
+    ensure_sync_service();
+    let mut cap_idx = None;
+    {
+        let slots = get_shell_caps();
+        for (i, slot_opt) in slots.iter().enumerate() {
+            if let Some(cap) = slot_opt {
+                if let Resource::IpcChannel { target_task } = cap.resource {
+                    if target_task.0 == 86 {
+                        cap_idx = Some(i);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    let cap_idx = match cap_idx {
+        Some(idx) => idx,
+        None => return Err(IpcError::NoCapability),
+    };
+    
+    let mut payload = [0u8; 128];
+    payload[0] = op;
+    payload[1] = obj_id;
+    payload[2] = is_mutex;
+    payload[3] = count;
+    
+    process::ipc::sys_send_typed(cap_idx, process::IpcTag::SyncOp as u16, 1, &payload)?;
+    let reply = process::ipc::sys_receive_typed()?;
+    if reply.tag != process::IpcTag::SyncReply {
+        return Err(IpcError::InvalidTag);
+    }
+    Ok(reply.payload)
+}
+
+fn get_sim_addresses(trace_name: &[u8]) -> [u64; 128] {
+    let mut addrs = [0u64; 128];
+    let total = NEXT_IDX.load(Ordering::SeqCst);
+    let count = core::cmp::min(total, TRACE_BUFFER_SIZE);
+    let start = if total > TRACE_BUFFER_SIZE { total % TRACE_BUFFER_SIZE } else { 0 };
+    
+    let mut matched_events = [TraceEvent { tick: 0, msg: "", param1: 0, param2: 0 }; 128];
+    let mut matched_count = 0;
+    
+    let trace_str = core::str::from_utf8(trace_name).unwrap_or("");
+    
+    for i in 0..count {
+        let idx = (start + i) % TRACE_BUFFER_SIZE;
+        let event = unsafe { TRACE_BUFFER[idx] };
+        
+        let matches = if trace_str == "all" {
+            true
+        } else if trace_str == "boot" {
+            event.msg.starts_with("cap") || event.msg.starts_with("sched")
+        } else {
+            event.msg.contains(trace_str)
+        };
+        
+        if matches && matched_count < 128 {
+            matched_events[matched_count] = event;
+            matched_count += 1;
+        }
+    }
+    
+    if matched_count == 0 {
+        let mut seed = 0u64;
+        for &b in trace_name {
+            seed = seed.wrapping_add(b as u64).wrapping_mul(31);
+        }
+        for i in 0..128 {
+            let step = i % 16;
+            let line = match step {
+                0 => 0, 1 => 4, 2 => 0, 3 => 4,
+                4 => 1, 5 => 5, 6 => 1, 7 => 5,
+                8 => 2, 9 => 6, 10 => 2, 11 => 6,
+                12 => 3, 13 => 7, 14 => 3, 15 => 7,
+                _ => 0,
+            };
+            addrs[i] = ((line + seed) % 12) * 64;
+        }
+    } else {
+        for i in 0..128 {
+            let event = matched_events[i % matched_count];
+            addrs[i] = crate::arch_sim::hash_event_to_addr(&event);
+        }
+    }
+    addrs
+}
+
+fn get_sim_instrs(trace_name: &[u8]) -> [crate::arch_sim::SimInstr; 128] {
+    let mut instrs = [crate::arch_sim::SimInstr {
+        kind: crate::arch_sim::InstrKind::Alu, rd: 0, rs1: 0, rs2: 0
+    }; 128];
+    
+    let total = NEXT_IDX.load(Ordering::SeqCst);
+    let count = core::cmp::min(total, TRACE_BUFFER_SIZE);
+    let start = if total > TRACE_BUFFER_SIZE { total % TRACE_BUFFER_SIZE } else { 0 };
+    
+    let mut matched_events = [TraceEvent { tick: 0, msg: "", param1: 0, param2: 0 }; 128];
+    let mut matched_count = 0;
+    
+    let trace_str = core::str::from_utf8(trace_name).unwrap_or("");
+    
+    for i in 0..count {
+        let idx = (start + i) % TRACE_BUFFER_SIZE;
+        let event = unsafe { TRACE_BUFFER[idx] };
+        
+        let matches = if trace_str == "all" {
+            true
+        } else if trace_str == "boot" {
+            event.msg.starts_with("cap") || event.msg.starts_with("sched")
+        } else {
+            event.msg.contains(trace_str)
+        };
+        
+        if matches && matched_count < 128 {
+            matched_events[matched_count] = event;
+            matched_count += 1;
+        }
+    }
+    
+    if matched_count == 0 {
+        for i in 0..128 {
+            if i % 3 == 0 {
+                instrs[i] = crate::arch_sim::SimInstr {
+                    kind: crate::arch_sim::InstrKind::Load, rd: 1, rs1: 0, rs2: 0
+                };
+            } else if i % 3 == 1 {
+                instrs[i] = crate::arch_sim::SimInstr {
+                    kind: crate::arch_sim::InstrKind::Alu, rd: 2, rs1: 1, rs2: 0
+                };
+            } else {
+                instrs[i] = crate::arch_sim::SimInstr {
+                    kind: crate::arch_sim::InstrKind::Store, rd: 0, rs1: 2, rs2: 0
+                };
+            }
+        }
+    } else {
+        for i in 0..128 {
+            let event = matched_events[i % matched_count];
+            instrs[i] = crate::arch_sim::event_to_instr(&event);
+        }
+    }
+    instrs
+}
+
+fn run_bench_ipc() {
+    ensure_echo_service();
+    let mut cap_idx = None;
+    {
+        let slots = get_shell_caps();
+        for (i, slot_opt) in slots.iter().enumerate() {
+            if let Some(cap) = slot_opt {
+                if let Resource::IpcChannel { target_task } = cap.resource {
+                    if target_task.0 == 65 {
+                        cap_idx = Some(i);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    let cap_idx = match cap_idx {
+        Some(idx) => idx,
+        None => {
+            print_fail!("no cap to echo service");
+            return;
+        }
+    };
+    
+    let iters = 1000;
+    let payload = [0x55u8; 16];
+    let start_ticks = preempt::stats().ticks;
+    
+    for _ in 0..iters {
+        let _ = process::ipc::sys_send_typed(cap_idx, process::IpcTag::Raw as u16, 1, &payload);
+        let _ = process::ipc::sys_receive_typed();
+    }
+    
+    let elapsed = preempt::stats().ticks.wrapping_sub(start_ticks);
+    let elapsed_ticks = if elapsed == 0 { 1 } else { elapsed };
+    let roundtrips_per_sec = iters * 100 / elapsed_ticks;
+    print_ok!("Benchmark IPC Latency:");
+    print_info!("  Roundtrips:         {}", iters);
+    print_info!("  Elapsed ticks:      {}", elapsed_ticks);
+    print_info!("  Roundtrips/sec:     {}", roundtrips_per_sec);
+}
+
+static BENCH_SCHED_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+extern "C" fn bench_sched_task_entry() -> ! {
+    BENCH_SCHED_COUNTER.fetch_add(1, Ordering::Relaxed);
+    scheduler::terminate_current_task();
+}
+
+fn run_bench_sched() {
+    let start_ticks = preempt::stats().ticks;
+    BENCH_SCHED_COUNTER.store(0, Ordering::Relaxed);
+    
+    let k = 20;
+    {
+        let mut sched = scheduler::SCHEDULER.lock();
+        for i in 0..k {
+            let task_id = 110 + i;
+            sched.tasks[task_id] = Some(Task::new(TaskId(task_id), bench_sched_task_entry, CapTable::new()));
+            crate::process::TASKS_SPAWNED.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    
+    loop {
+        let active = {
+            let sched = scheduler::SCHEDULER.lock();
+            let mut count = 0;
+            for i in 0..k {
+                if let Some(t) = &sched.tasks[110 + i] {
+                    if !matches!(t.state, TaskState::Terminated) {
+                        count += 1;
+                    }
+                }
+            }
+            count
+        };
+        if active == 0 {
+            break;
+        }
+        scheduler::yield_cpu();
+    }
+    
+    let elapsed = preempt::stats().ticks.wrapping_sub(start_ticks);
+    let elapsed_ticks = if elapsed == 0 { 1 } else { elapsed };
+    let switches_per_sec = (k as u64) * 100 / elapsed_ticks;
+    print_ok!("Benchmark Scheduler Throughput:");
+    print_info!("  Spawned tasks:      {}", k);
+    print_info!("  Elapsed ticks:      {}", elapsed_ticks);
+    print_info!("  Switches/sec:       {}", switches_per_sec);
+}
+
+fn run_bench_cap() {
+    ensure_fs_service();
+    let initial_tracing = TRACING_ACTIVE.swap(false, Ordering::SeqCst);
+    
+    let iters = 10000;
+    let start_ticks = preempt::stats().ticks;
+    
+    let sched = scheduler::SCHEDULER.lock();
+    let task = sched.get_task(TaskId(64)).unwrap();
+    let cap_table = &task.cap_table;
+    
+    for _ in 0..iters {
+        let _ = cap_table.get(0);
+    }
+    
+    drop(sched);
+    TRACING_ACTIVE.store(initial_tracing, Ordering::SeqCst);
+    
+    let elapsed = preempt::stats().ticks.wrapping_sub(start_ticks);
+    let elapsed_ticks = if elapsed == 0 { 1 } else { elapsed };
+    let lookups_per_sec = iters * 100 / elapsed_ticks;
+    print_ok!("Benchmark Capability Lookup:");
+    print_info!("  Iterations:         {}", iters);
+    print_info!("  Elapsed ticks:      {}", elapsed_ticks);
+    print_info!("  Lookups/sec:        {}", lookups_per_sec);
+}
+
+fn run_bench_fs() {
+    ensure_fs_service();
+    let iters = 500;
+    let path = b"/bench_temp";
+    let data = b"some data to write to fs during benchmarking";
+    
+    let start_ticks = preempt::stats().ticks;
+    for _ in 0..iters {
+        let _ = send_fs_msg(1, 0, path, data);
+        let _ = send_fs_msg(2, 0, path, &[]);
+    }
+    
+    let elapsed = preempt::stats().ticks.wrapping_sub(start_ticks);
+    let elapsed_ticks = if elapsed == 0 { 1 } else { elapsed };
+    let ops_per_sec = iters * 2 * 100 / elapsed_ticks;
+    print_ok!("Benchmark Filesystem Throughput:");
+    print_info!("  Iterations (W+R):   {}", iters);
+    print_info!("  Elapsed ticks:      {}", elapsed_ticks);
+    print_info!("  Ops/sec:            {}", ops_per_sec);
+}
+
+extern "C" fn bench_contend_task() -> ! {
+    let obj_id = BENCH_CONTEND_OBJ.load(Ordering::Relaxed);
+    for _ in 0..BENCH_CONTEND_ITERS {
+        let _ = process::ipc::sys_send_typed(1, process::IpcTag::SyncOp as u16, 1, &[1, obj_id, 0, 0]);
+        let _ = process::ipc::sys_receive_typed();
+        let _ = process::ipc::sys_send_typed(1, process::IpcTag::SyncOp as u16, 1, &[2, obj_id, 0, 0]);
+        let _ = process::ipc::sys_receive_typed();
+    }
+    scheduler::terminate_current_task();
+}
+
+const BENCH_CONTEND_ITERS: usize = 600;
+
+static BENCH_CONTEND_OBJ: AtomicU8 = AtomicU8::new(0);
+
+/// Measures average IPC+lock latency under N tasks contending for one mutex
+/// via the sync service, exercising the global scheduler lock under load.
+fn run_bench_contend(n: usize, obj_id: u8) {
+    ensure_sync_service();
+    let iters_per_task = BENCH_CONTEND_ITERS;
+    BENCH_CONTEND_OBJ.store(obj_id, Ordering::Relaxed);
+    let _ = send_sync_msg(0, obj_id, 1, 1);
+
+    let mut caps = CapTable::new();
+    let _ = caps.insert(Capability {
+        resource: Resource::SyncObj { id: obj_id },
+        read: true, write: true, grant: false, sealed: false, id: 0, origin: None,
+    });
+    let _ = caps.insert(Capability {
+        resource: Resource::IpcChannel { target_task: TaskId(86) },
+        read: true, write: true, grant: false, sealed: false, id: 0, origin: None,
+    });
+
+    let base = 90usize;
+    let start_ticks = preempt::stats().ticks;
+    {
+        let mut sched = scheduler::SCHEDULER.lock();
+        for i in 0..n {
+            sched.tasks[base + i] = Some(Task::new(TaskId(base + i), bench_contend_task, caps.clone()));
+            crate::process::TASKS_SPAWNED.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    loop {
+        let active = {
+            let sched = scheduler::SCHEDULER.lock();
+            let mut count = 0;
+            for i in 0..n {
+                if let Some(t) = &sched.tasks[base + i] {
+                    if !matches!(t.state, TaskState::Terminated) {
+                        count += 1;
+                    }
+                }
+            }
+            count
+        };
+        if active == 0 {
+            break;
+        }
+        scheduler::yield_cpu();
+    }
+
+    let elapsed = preempt::stats().ticks.wrapping_sub(start_ticks);
+    let elapsed_ticks = if elapsed == 0 { 1 } else { elapsed };
+    let elapsed_ms = elapsed_ticks * 10;
+    let total_ops = (n * iters_per_task * 2) as u64;
+    let avg_latency_us = (elapsed_ms * 1000) / total_ops;
+    print_ok!("Benchmark Lock Contention (N={}):", n);
+    print_info!("  Tasks:              {}", n);
+    print_info!("  Acquire+Release ops:{}", total_ops);
+    print_info!("  Elapsed ticks:      {}", elapsed_ticks);
+    print_info!("  Avg op latency(us): {}", avg_latency_us);
+}
+
+static BENCH_SYNC_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+extern "C" fn sync_demo_guarded_task() -> ! {
+    for _ in 0..100 {
+        let _ = process::ipc::sys_send_typed(1, process::IpcTag::SyncOp as u16, 1, &[1, 7, 0, 0]);
+        let _ = process::ipc::sys_receive_typed();
+        
+        let val = BENCH_SYNC_COUNTER.load(Ordering::Relaxed);
+        for _ in 0..200000 { core::hint::spin_loop(); }
+        BENCH_SYNC_COUNTER.store(val + 1, Ordering::Relaxed);
+        
+        let _ = process::ipc::sys_send_typed(1, process::IpcTag::SyncOp as u16, 1, &[2, 7, 0, 0]);
+        let _ = process::ipc::sys_receive_typed();
+    }
+    scheduler::terminate_current_task();
+}
+
+extern "C" fn sync_demo_unguarded_task() -> ! {
+    for _ in 0..100 {
+        let val = BENCH_SYNC_COUNTER.load(Ordering::Relaxed);
+        for _ in 0..200000 { core::hint::spin_loop(); }
+        BENCH_SYNC_COUNTER.store(val + 1, Ordering::Relaxed);
+    }
+    scheduler::terminate_current_task();
+}
+
+fn run_sync_demo() {
+    print_info!("Starting Sync Demo...");
+    BENCH_SYNC_COUNTER.store(0, Ordering::Relaxed);
+    let _ = send_sync_msg(0, 7, 1, 1);
+    
+    let mut caps = CapTable::new();
+    let _ = caps.insert(Capability {
+        resource: Resource::SyncObj { id: 7 },
+        read: true, write: true, grant: false, sealed: false, id: 0, origin: None
+    });
+    let _ = caps.insert(Capability {
+        resource: Resource::IpcChannel { target_task: TaskId(86) },
+        read: true, write: true, grant: false, sealed: false, id: 0, origin: None
+    });
+    
+    let originally_preempt = preempt::is_armed();
+    preempt::set_armed(true);
+    
+    {
+        let mut sched = scheduler::SCHEDULER.lock();
+        sched.tasks[78] = Some(Task::new(TaskId(78), sync_demo_guarded_task, caps.clone()));
+        sched.tasks[79] = Some(Task::new(TaskId(79), sync_demo_guarded_task, caps.clone()));
+    }
+    
+    loop {
+        let active = {
+            let sched = scheduler::SCHEDULER.lock();
+            let a_active = match &sched.tasks[78] {
+                Some(t) => !matches!(t.state, TaskState::Terminated),
+                None => false,
+            };
+            let b_active = match &sched.tasks[79] {
+                Some(t) => !matches!(t.state, TaskState::Terminated),
+                None => false,
+            };
+            a_active || b_active
+        };
+        if !active {
+            break;
+        }
+        scheduler::yield_cpu();
+    }
+    
+    let guarded_final = BENCH_SYNC_COUNTER.load(Ordering::Relaxed);
+    print_ok!("Guarded run final counter: {} (Expected: 200)", guarded_final);
+    
+    BENCH_SYNC_COUNTER.store(0, Ordering::Relaxed);
+    {
+        let mut sched = scheduler::SCHEDULER.lock();
+        sched.tasks[78] = Some(Task::new(TaskId(78), sync_demo_unguarded_task, CapTable::new()));
+        sched.tasks[79] = Some(Task::new(TaskId(79), sync_demo_unguarded_task, CapTable::new()));
+    }
+    
+    loop {
+        let active = {
+            let sched = scheduler::SCHEDULER.lock();
+            let a_active = match &sched.tasks[78] {
+                Some(t) => !matches!(t.state, TaskState::Terminated),
+                None => false,
+            };
+            let b_active = match &sched.tasks[79] {
+                Some(t) => !matches!(t.state, TaskState::Terminated),
+                None => false,
+            };
+            a_active || b_active
+        };
+        if !active {
+            break;
+        }
+        scheduler::yield_cpu();
+    }
+    
+    preempt::set_armed(originally_preempt);
+    let unguarded_final = BENCH_SYNC_COUNTER.load(Ordering::Relaxed);
+    print_ok!("Unguarded run final counter: {} (Expected: < 200 due to race condition)", unguarded_final);
+}
+
 fn dispatch(line: &[u8]) -> Result<(), ()> {
     let mut tokens = [None; 4];
     let count = tokenize(line, &mut tokens);
@@ -241,6 +840,8 @@ fn dispatch(line: &[u8]) -> Result<(), ()> {
                 print_info!("Group F: history [<n>], trace <command>, perf, watch <command> <interval>");
                 print_info!("Group G: kv set <slot> <key> <value>, kv get <slot> <key>, kv grant <slot> <task>, kv revoke <slot>");
                 print_info!("Group H: log publish <kind> <message>, log read <kind>, log grant <kind> <task> <r|w|rw>, log revoke <kind>, log tail");
+                print_info!("Group I: fs mkdir/write/read/ls/delete/stat, dev list/read/write, arch cache-sim/pipeline-sim, bench all, sync create/acquire/release/demo");
+                print_info!("Group J: smp info/ping");
                 print_info!("Type 'help <command> [<subcommand>]' for details on a specific command.");
             } else {
                 match tok1 {
@@ -386,6 +987,36 @@ fn dispatch(line: &[u8]) -> Result<(), ()> {
                         print_info!("log revoke <kind> - Revoke shell's capability for event log kind.");
                         print_info!("log tail - Continuously read and display all readable kinds every tick.");
                     }
+                    b"fs" => {
+                        print_info!("fs mkdir <path> - Create a new directory.");
+                        print_info!("fs write <path> <text> - Create or write data to a file.");
+                        print_info!("fs read <path> - Read data from a file.");
+                        print_info!("fs ls <path> - List contents of a directory.");
+                        print_info!("fs delete <path> - Delete a file or directory.");
+                        print_info!("fs stat <path> - Display metadata for a path.");
+                    }
+                    b"dev" => {
+                        print_info!("dev list - List all available hardware devices.");
+                        print_info!("dev read <id> - Read from a device.");
+                        print_info!("dev write <id> <text> - Write text to a device.");
+                    }
+                    b"arch" => {
+                        print_info!("arch cache-sim <trace> <assoc> <lines> - Simulate set-associative LRU cache.");
+                        print_info!("arch pipeline-sim <trace> - Simulate 5-stage in-order pipeline with hazard stalls.");
+                    }
+                    b"bench" => {
+                        print_info!("bench <ipc|sched|cap|fs|all> - Run performance benchmarks.");
+                    }
+                    b"smp" => {
+                        print_info!("smp info - Print information about active CPU cores.");
+                        print_info!("smp ping - Send an IPI ping to secondary AP core and check acknowledgment.");
+                    }
+                    b"sync" => {
+                        print_info!("sync create <id> <mutex|sem> <count> - Create a new mutex or semaphore.");
+                        print_info!("sync acquire <id> - Acquire a lock or decrement semaphore permit.");
+                        print_info!("sync release <id> - Release a lock or increment semaphore permit.");
+                        print_info!("sync demo - Run a preemption race condition demo with guarded and unguarded counters.");
+                    }
                     other => {
                         let s = core::str::from_utf8(other).unwrap_or("");
                         print_fail!("unknown command group: {}", s);
@@ -417,6 +1048,15 @@ fn dispatch(line: &[u8]) -> Result<(), ()> {
                         }
                         Resource::LogChannel { kind, readable, writable } => {
                             print_ok!("slot {}: id={} LogChannel(kind {}) r={} w={} g={} sealed={} origin={:?}", i, cap.id, kind, readable, writable, cap.grant, cap.sealed, cap.origin);
+                        }
+                        Resource::FsNode { mount, readable, writable } => {
+                            print_ok!("slot {}: id={} FsNode(mount {}) r={} w={} g={} sealed={} origin={:?}", i, cap.id, mount, readable, writable, cap.grant, cap.sealed, cap.origin);
+                        }
+                        Resource::Device { id, readable, writable } => {
+                            print_ok!("slot {}: id={} Device(id {}) r={} w={} g={} sealed={} origin={:?}", i, cap.id, id, readable, writable, cap.grant, cap.sealed, cap.origin);
+                        }
+                        Resource::SyncObj { id } => {
+                            print_ok!("slot {}: id={} SyncObj(id {}) g={} sealed={} origin={:?}", i, cap.id, id, cap.grant, cap.sealed, cap.origin);
                         }
                     }
                 }
@@ -641,7 +1281,7 @@ fn dispatch(line: &[u8]) -> Result<(), ()> {
             if cap_at_use.is_none() && fired {
                 print_vuln!("validated id={}; revoker ran mid-window; cap GONE at use", cap_id);
             } else {
-                print_fail!("vulnerable phase of race did not trigger");
+                print_fail!("vulnerable stage of race did not trigger");
             }
 
             let _cap_id2 = {
@@ -685,11 +1325,41 @@ fn dispatch(line: &[u8]) -> Result<(), ()> {
             if cap_at_use2.is_some() && !fired2 {
                 print_pass!("non-preemptible region: tick landed but revoker deferred; cap intact");
             } else {
-                print_fail!("guarded phase of race failed");
+                print_fail!("guarded stage of race failed");
             }
 
             preempt::disarm_adversary();
             preempt::set_armed(false);
+        }
+        (b"sched", b"preempt-user") => {
+            let originally_armed = preempt::is_armed();
+            let start_preempts = preempt::stats().preemptions;
+            let start_ticks = preempt::stats().ticks;
+            
+            {
+                let mut sched = scheduler::SCHEDULER.lock();
+                sched.tasks[72] = Some(crate::userspace::spawn_preempt_user_task(TaskId(72), CapTable::new()));
+            }
+            
+            preempt::set_armed(true);
+            print_info!("preemption armed. running never-yielding user task...");
+            
+            while preempt::stats().ticks.wrapping_sub(start_ticks) < 50 {
+                scheduler::yield_cpu();
+            }
+            
+            preempt::set_armed(originally_armed);
+            
+            {
+                let mut sched = scheduler::SCHEDULER.lock();
+                sched.tasks[72] = None;
+                crate::process::TASKS_TERMINATED.fetch_add(1, Ordering::SeqCst);
+            }
+            
+            let end_preempts = preempt::stats().preemptions;
+            let diff = end_preempts.wrapping_sub(start_preempts);
+            print_ok!("preemption-user demo complete.");
+            print_info!("  preemptions observed: {}", diff);
         }
         (b"fault", b"spawn") => {
             {
@@ -1325,7 +1995,6 @@ fn dispatch(line: &[u8]) -> Result<(), ()> {
                         origin: Some(donor.id),
                     };
                     
-                    let mut new_id = 0;
                     {
                         let mut sched = scheduler::SCHEDULER.lock();
                         if sched.tasks[target_task_id].is_none() {
@@ -1336,7 +2005,6 @@ fn dispatch(line: &[u8]) -> Result<(), ()> {
                             let new_slot = target_task.cap_table.insert(derived).unwrap();
                             if let Some(ref mut cap) = target_task.cap_table.slots[new_slot] {
                                 cap.origin = Some(donor.id);
-                                new_id = cap.id;
                             }
                         }
                     }
@@ -1381,6 +2049,513 @@ fn dispatch(line: &[u8]) -> Result<(), ()> {
                 other => {
                     let s = core::str::from_utf8(other).unwrap_or("");
                     print_fail!("unknown kv subcommand: {}", s);
+                }
+            }
+        }
+        (b"fs", _) => {
+            match tok1 {
+                b"mkdir" => {
+                    if tok2.is_empty() {
+                        print_fail!("Usage: fs mkdir <path>");
+                        return Ok(());
+                    }
+                    match send_fs_msg(0, 0, tok2, &[]) {
+                        Ok(reply) => {
+                            match reply[0] {
+                                0 => print_ok!("directory created"),
+                                1 => print_fail!("permission denied"),
+                                3 => print_fail!("filesystem full"),
+                                4 => print_fail!("already exists / bad request"),
+                                _ => print_fail!("unknown error"),
+                            }
+                        }
+                        Err(e) => print_fail!("IPC error: {:?}", e),
+                    }
+                }
+                b"write" => {
+                    if tok2.is_empty() || tok3.is_empty() {
+                        print_fail!("Usage: fs write <path> <text>");
+                        return Ok(());
+                    }
+                    match send_fs_msg(1, 0, tok2, tok3) {
+                        Ok(reply) => {
+                            match reply[0] {
+                                0 => print_ok!("file written"),
+                                1 => print_fail!("permission denied"),
+                                3 => print_fail!("filesystem full"),
+                                4 => print_fail!("is directory / bad request"),
+                                _ => print_fail!("unknown error"),
+                            }
+                        }
+                        Err(e) => print_fail!("IPC error: {:?}", e),
+                    }
+                }
+                b"read" => {
+                    if tok2.is_empty() {
+                        print_fail!("Usage: fs read <path>");
+                        return Ok(());
+                    }
+                    match send_fs_msg(2, 0, tok2, &[]) {
+                        Ok(reply) => {
+                            match reply[0] {
+                                0 => {
+                                    let data_len = reply[1] as usize;
+                                    let data_bytes = &reply[2..2 + data_len];
+                                    let data_str = core::str::from_utf8(data_bytes).unwrap_or("");
+                                    print_ok!("{}", data_str);
+                                }
+                                1 => print_fail!("permission denied"),
+                                2 => print_fail!("not found"),
+                                _ => print_fail!("unknown error"),
+                            }
+                        }
+                        Err(e) => print_fail!("IPC error: {:?}", e),
+                    }
+                }
+                b"ls" => {
+                    if tok2.is_empty() {
+                        print_fail!("Usage: fs ls <path>");
+                        return Ok(());
+                    }
+                    match send_fs_msg(3, 0, tok2, &[]) {
+                        Ok(reply) => {
+                            match reply[0] {
+                                0 => {
+                                    let data_bytes = &reply[2..];
+                                    let end_idx = data_bytes.iter().position(|&b| b == 0).unwrap_or(data_bytes.len());
+                                    let data_str = core::str::from_utf8(&data_bytes[..end_idx]).unwrap_or("");
+                                    for line in data_str.lines() {
+                                        if !line.is_empty() {
+                                            print_ok!("{}", line);
+                                        }
+                                    }
+                                }
+                                1 => print_fail!("permission denied"),
+                                2 => print_fail!("not found"),
+                                _ => print_fail!("unknown error"),
+                            }
+                        }
+                        Err(e) => print_fail!("IPC error: {:?}", e),
+                    }
+                }
+                b"delete" => {
+                    if tok2.is_empty() {
+                        print_fail!("Usage: fs delete <path>");
+                        return Ok(());
+                    }
+                    match send_fs_msg(4, 0, tok2, &[]) {
+                        Ok(reply) => {
+                            match reply[0] {
+                                0 => print_ok!("deleted"),
+                                1 => print_fail!("permission denied"),
+                                2 => print_fail!("not found"),
+                                _ => print_fail!("unknown error"),
+                            }
+                        }
+                        Err(e) => print_fail!("IPC error: {:?}", e),
+                    }
+                }
+                b"stat" => {
+                    if tok2.is_empty() {
+                        print_fail!("Usage: fs stat <path>");
+                        return Ok(());
+                    }
+                    match send_fs_msg(5, 0, tok2, &[]) {
+                        Ok(reply) => {
+                            match reply[0] {
+                                0 => {
+                                    let is_dir = reply[1] != 0;
+                                    let mut size_bytes = [0u8; 8];
+                                    size_bytes.copy_from_slice(&reply[2..10]);
+                                    let size = u64::from_ne_bytes(size_bytes);
+                                    let mount = reply[10];
+                                    print_ok!("Type: {}, Size: {} bytes, Mount: {}", if is_dir { "Directory" } else { "File" }, size, mount);
+                                }
+                                1 => print_fail!("permission denied"),
+                                2 => print_fail!("not found"),
+                                _ => print_fail!("unknown error"),
+                            }
+                        }
+                        Err(e) => print_fail!("IPC error: {:?}", e),
+                    }
+                }
+                other => {
+                    let s = core::str::from_utf8(other).unwrap_or("");
+                    print_fail!("unknown fs subcommand: {}", s);
+                }
+            }
+        }
+        (b"dev", _) => {
+            match tok1 {
+                b"list" => {
+                    let slots = get_shell_caps();
+                    let mut has_serial = "no";
+                    let mut has_kbd = "no";
+                    for cap_opt in slots.iter() {
+                        if let Some(cap) = cap_opt {
+                            if let Resource::Device { id, readable, writable } = cap.resource {
+                                if id == 0 {
+                                    has_serial = if readable && writable { "rw" } else if readable { "r" } else if writable { "w" } else { "none" };
+                                } else if id == 1 {
+                                    has_kbd = if readable && writable { "rw" } else if readable { "r" } else if writable { "w" } else { "none" };
+                                }
+                            }
+                        }
+                    }
+                    print_ok!("Devices:");
+                    print_info!("  0: serial (caps: {})", has_serial);
+                    print_info!("  1: keyboard (caps: {})", has_kbd);
+                }
+                b"read" => {
+                    let id = parse_usize(tok2)? as u8;
+                    match send_dev_msg(0, id, &[]) {
+                        Ok(reply) => {
+                            match reply[0] {
+                                0 => {
+                                    let len = reply[1] as usize;
+                                    let read_bytes = &reply[2..2 + len];
+                                    let read_str = core::str::from_utf8(read_bytes).unwrap_or("");
+                                    print_ok!("read ({} bytes): {}", len, read_str);
+                                }
+                                1 => print_fail!("permission denied"),
+                                2 => print_fail!("no data available"),
+                                3 => print_fail!("invalid device"),
+                                _ => print_fail!("unknown error"),
+                            }
+                        }
+                        Err(e) => print_fail!("IPC error: {:?}", e),
+                    }
+                }
+                b"write" => {
+                    let id = parse_usize(tok2)? as u8;
+                    if tok3.is_empty() {
+                        print_fail!("Usage: dev write <id> <text>");
+                        return Ok(());
+                    }
+                    match send_dev_msg(1, id, tok3) {
+                        Ok(reply) => {
+                            match reply[0] {
+                                0 => print_ok!("write complete"),
+                                1 => print_fail!("permission denied"),
+                                3 => print_fail!("invalid operation / device"),
+                                _ => print_fail!("unknown error"),
+                            }
+                        }
+                        Err(e) => print_fail!("IPC error: {:?}", e),
+                    }
+                }
+                other => {
+                    let s = core::str::from_utf8(other).unwrap_or("");
+                    print_fail!("unknown dev subcommand: {}", s);
+                }
+            }
+        }
+        (b"arch", _) => {
+            match tok1 {
+                b"cache-sim" => {
+                    if tok2.is_empty() || tok3.is_empty() {
+                        print_fail!("Usage: arch cache-sim <trace> <assoc> <lines>");
+                        return Ok(());
+                    }
+                    let rest = tok3;
+                    let mut split_idx = 0;
+                    while split_idx < rest.len() && rest[split_idx] != b' ' {
+                        split_idx += 1;
+                    }
+                    if split_idx >= rest.len() {
+                        print_fail!("Usage: arch cache-sim <trace> <assoc> <lines>");
+                        return Ok(());
+                    }
+                    let assoc_tok = &rest[..split_idx];
+                    let mut lines_start = split_idx;
+                    while lines_start < rest.len() && rest[lines_start] == b' ' {
+                        lines_start += 1;
+                    }
+                    if lines_start >= rest.len() {
+                        print_fail!("Usage: arch cache-sim <trace> <assoc> <lines>");
+                        return Ok(());
+                    }
+                    let lines_tok = &rest[lines_start..];
+                    
+                    let assoc = parse_usize(assoc_tok)?;
+                    let lines = parse_usize(lines_tok)?;
+                    
+                    if lines > 1024 {
+                        print_fail!("too many lines, maximum is 1024");
+                        return Ok(());
+                    }
+                    
+                    let addrs = get_sim_addresses(tok2);
+                    let cfg = crate::arch_sim::CacheConfig {
+                        assoc,
+                        num_lines: lines,
+                        line_bytes: 64,
+                    };
+                    
+                    let stats = crate::arch_sim::simulate_cache(&cfg, &addrs);
+                    let hit_rate = if stats.accesses > 0 {
+                        stats.hits * 100 / stats.accesses
+                    } else {
+                        0
+                    };
+                    print_ok!("Cache Sim Results:");
+                    print_info!("  Accesses:    {}", stats.accesses);
+                    print_info!("  Hits:        {}", stats.hits);
+                    print_info!("  Misses:      {}", stats.misses);
+                    print_info!("  Evictions:   {}", stats.evictions);
+                    print_info!("  Hit Rate:    {}%", hit_rate);
+                }
+                b"pipeline-sim" => {
+                    if tok2.is_empty() {
+                        print_fail!("Usage: arch pipeline-sim <trace>");
+                        return Ok(());
+                    }
+                    let instrs = get_sim_instrs(tok2);
+                    let stats = crate::arch_sim::simulate_pipeline(&instrs);
+                    let cpi_hundreds = if stats.instrs > 0 {
+                        stats.cycles * 100 / stats.instrs
+                    } else {
+                        100
+                    };
+                    let cpi_int = cpi_hundreds / 100;
+                    let cpi_frac = cpi_hundreds % 100;
+                    print_ok!("Pipeline Sim Results:");
+                    print_info!("  Instructions: {}", stats.instrs);
+                    print_info!("  Cycles:       {}", stats.cycles);
+                    print_info!("  Stalls:       {}", stats.stalls);
+                    print_info!("  CPI:          {}.{:02}", cpi_int, cpi_frac);
+                }
+                other => {
+                    let s = core::str::from_utf8(other).unwrap_or("");
+                    print_fail!("unknown arch subcommand: {}", s);
+                }
+            }
+        }
+        (b"bench", _) => {
+            print_info!("Running benchmarks (preemption disarmed for stability)...");
+            match tok1 {
+                b"ipc" => {
+                    run_bench_ipc();
+                }
+                b"sched" => {
+                    run_bench_sched();
+                }
+                b"cap" => {
+                    run_bench_cap();
+                }
+                b"fs" => {
+                    run_bench_fs();
+                }
+                b"mem" => {
+                    print_ok!("Benchmark Per-Task Memory Footprint:");
+                    print_info!("  size_of::<Task>():         {} bytes", core::mem::size_of::<process::Task>());
+                    print_info!("  size_of::<CapTable>():     {} bytes", core::mem::size_of::<CapTable>());
+                    print_info!("  size_of::<MessageQueue>(): {} bytes", core::mem::size_of::<process::ipc::MessageQueue>());
+                    print_info!("  size_of::<Message>():      {} bytes", core::mem::size_of::<process::ipc::Message>());
+                    print_info!("  kernel stack per task:     {} bytes", process::STACK_SIZE);
+                    print_info!("  MAX_TASKS:                 {}", process::MAX_TASKS);
+                }
+                b"contend" => {
+                    let n = parse_usize(tok2).unwrap_or(2).clamp(1, 16);
+                    let obj_id = match n {
+                        1..=2 => 2,
+                        3..=4 => 3,
+                        5..=8 => 4,
+                        _ => 5,
+                    };
+                    run_bench_contend(n, obj_id);
+                }
+                b"all" => {
+                    run_bench_ipc();
+                    run_bench_sched();
+                    run_bench_cap();
+                    run_bench_fs();
+                }
+                _ => {
+                    print_fail!("Usage: bench <ipc|sched|cap|fs|mem|contend <n>|all>");
+                }
+            }
+        }
+        (b"smp", _) => {
+            match tok1 {
+                b"info" => {
+                    if let Some(mp_response) = crate::MP_REQUEST.response() {
+                        let cpus = mp_response.cpus();
+                        print_ok!("Symmetric Multiprocessing (SMP) Info:");
+                        print_info!("  BSP LAPIC ID: {}", mp_response.bsp_lapic_id);
+                        print_info!("  Total CPUs detected: {}", cpus.len());
+                        for cpu in cpus {
+                            let is_bsp = cpu.lapic_id == mp_response.bsp_lapic_id;
+                            print_info!(
+                                "  - CPU {}: LAPIC ID {}, {}",
+                                cpu.processor_id,
+                                cpu.lapic_id,
+                                if is_bsp { "BSP (Bootstrap)" } else { "AP (Application)" }
+                            );
+                        }
+                    } else {
+                        print_fail!("No multiprocessor response from bootloader.");
+                    }
+                }
+                b"ping" => {
+                    if let Some(mp_response) = crate::MP_REQUEST.response() {
+                        let cpus = mp_response.cpus();
+                        let mut target_ap = None;
+                        for cpu in cpus {
+                            if cpu.lapic_id != mp_response.bsp_lapic_id {
+                                target_ap = Some(cpu);
+                                break;
+                            }
+                        }
+                        if let Some(ap) = target_ap {
+                            let prev_ack = crate::arch::apic::IPI_ACK_COUNT.load(core::sync::atomic::Ordering::SeqCst);
+                            print_info!("Sending IPI (vector 0x40) to AP CPU {} (LAPIC ID {})...", ap.processor_id, ap.lapic_id);
+                            unsafe {
+                                crate::arch::apic::send_ipi(ap.lapic_id, 0x40);
+                            }
+                            // Spin-wait up to 10 million loops for acknowledgment
+                            let mut acked = false;
+                            for _ in 0..10_000_000 {
+                                let curr_ack = crate::arch::apic::IPI_ACK_COUNT.load(core::sync::atomic::Ordering::SeqCst);
+                                if curr_ack > prev_ack {
+                                    acked = true;
+                                    break;
+                                }
+                                core::hint::spin_loop();
+                            }
+                            if acked {
+                                let current_count = crate::arch::apic::IPI_ACK_COUNT.load(core::sync::atomic::Ordering::SeqCst);
+                                print_ok!("IPI Acknowledged! Ack count: {}", current_count);
+                            } else {
+                                print_fail!("IPI Ping Timeout. No acknowledgment from AP core.");
+                            }
+                        } else {
+                            print_fail!("No secondary AP core detected to ping.");
+                        }
+                    } else {
+                        print_fail!("No multiprocessor response from bootloader.");
+                    }
+                }
+                _ => {
+                    print_fail!("Usage: smp <info|ping>");
+                }
+            }
+        }
+        (b"sync", _) => {
+            match tok1 {
+                b"create" => {
+                    let id = parse_usize(tok2)? as u8;
+                    if id >= 8 {
+                        print_fail!("object id must be < 8");
+                        return Ok(());
+                    }
+                    let is_mutex = if tok3.starts_with(b"mutex") { 1 } else { 0 };
+                    let initial_count = if is_mutex == 1 { 1 } else {
+                        let rest = tok3;
+                        let mut split_idx = 0;
+                        while split_idx < rest.len() && rest[split_idx] != b' ' {
+                            split_idx += 1;
+                        }
+                        while split_idx < rest.len() && rest[split_idx] == b' ' {
+                            split_idx += 1;
+                        }
+                        if split_idx < rest.len() {
+                            parse_usize(&rest[split_idx..])? as u8
+                        } else {
+                            1
+                        }
+                    };
+                    
+                    match send_sync_msg(0, id, is_mutex, initial_count) {
+                        Ok(reply) => {
+                            if reply[0] == 0 {
+                                let mut sched = scheduler::SCHEDULER.lock();
+                                let shell = sched.get_task_mut(TaskId(64)).unwrap();
+                                let _ = shell.cap_table.insert(Capability {
+                                    resource: Resource::SyncObj { id },
+                                    read: true,
+                                    write: true,
+                                    grant: true,
+                                    sealed: false,
+                                    id: 0,
+                                    origin: None,
+                                });
+                                print_ok!("sync object created and capability installed");
+                            } else {
+                                print_fail!("failed to create sync object");
+                            }
+                        }
+                        Err(e) => print_fail!("IPC error: {:?}", e),
+                    }
+                }
+                b"acquire" => {
+                    let id = parse_usize(tok2)? as u8;
+                    let mut has_cap = false;
+                    {
+                        let slots = get_shell_caps();
+                        for slot in slots.iter() {
+                            if let Some(cap) = slot {
+                                if let Resource::SyncObj { id: cap_id } = cap.resource {
+                                    if cap_id == id {
+                                        has_cap = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if !has_cap {
+                        print_fail!("no capability for sync object {}", id);
+                        return Ok(());
+                    }
+                    match send_sync_msg(1, id, 0, 0) {
+                        Ok(reply) => {
+                            if reply[0] == 0 {
+                                print_ok!("acquired");
+                            } else {
+                                print_fail!("acquire failed: status={}", reply[0]);
+                            }
+                        }
+                        Err(e) => print_fail!("IPC error: {:?}", e),
+                    }
+                }
+                b"release" => {
+                    let id = parse_usize(tok2)? as u8;
+                    let mut has_cap = false;
+                    {
+                        let slots = get_shell_caps();
+                        for slot in slots.iter() {
+                            if let Some(cap) = slot {
+                                if let Resource::SyncObj { id: cap_id } = cap.resource {
+                                    if cap_id == id {
+                                        has_cap = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if !has_cap {
+                        print_fail!("no capability for sync object {}", id);
+                        return Ok(());
+                    }
+                    match send_sync_msg(2, id, 0, 0) {
+                        Ok(reply) => {
+                            if reply[0] == 0 {
+                                print_ok!("released");
+                            } else {
+                                print_fail!("release failed: status={}", reply[0]);
+                            }
+                        }
+                        Err(e) => print_fail!("IPC error: {:?}", e),
+                    }
+                }
+                b"demo" => {
+                    run_sync_demo();
+                }
+                other => {
+                    let s = core::str::from_utf8(other).unwrap_or("");
+                    print_fail!("unknown sync subcommand: {}", s);
                 }
             }
         }
@@ -1762,6 +2937,12 @@ fn parse_usize(tok: &[u8]) -> Result<usize, ()> {
     Ok(val)
 }
 
+pub static FS_OPS: AtomicU64 = AtomicU64::new(0);
+pub static DEV_OPS: AtomicU64 = AtomicU64::new(0);
+pub static SYNC_ACQ: AtomicU64 = AtomicU64::new(0);
+pub static SYNC_REL: AtomicU64 = AtomicU64::new(0);
+pub static KBD_IRQS: AtomicU64 = AtomicU64::new(0);
+
 static COUNTER_A: AtomicU64 = AtomicU64::new(0);
 static COUNTER_B: AtomicU64 = AtomicU64::new(0);
 
@@ -2049,6 +3230,35 @@ fn print_trace_summary() {
             }
             "cap_revoke" => {
                 print_info!("  [{}] cap: revoke/remove slot {}, cap id {}", event.tick, event.param1, event.param2);
+            }
+            "fs_op" => {
+                let op_name = match event.param1 {
+                    0 => "mkdir",
+                    1 => "write",
+                    2 => "read",
+                    3 => "ls",
+                    4 => "delete",
+                    5 => "stat",
+                    _ => "unknown",
+                };
+                print_info!("  [{}] fs: op {} status={}", event.tick, op_name, event.param2);
+            }
+            "dev_op" => {
+                let op_name = match event.param1 {
+                    0 => "read",
+                    1 => "write",
+                    _ => "unknown",
+                };
+                print_info!("  [{}] dev: op {} status={}", event.tick, op_name, event.param2);
+            }
+            "sync_op" => {
+                let op_name = match event.param1 {
+                    0 => "create",
+                    1 => "acquire",
+                    2 => "release",
+                    _ => "unknown",
+                };
+                print_info!("  [{}] sync: op {} status={}", event.tick, op_name, event.param2);
             }
             other => {
                 print_info!("  [{}] {}: param1={}, param2={}", event.tick, other, event.param1, event.param2);
@@ -2463,3 +3673,621 @@ extern "C" fn log_service_main() -> ! {
         }
     }
 }
+
+// ── Virtual filesystem service ──────────────────────────────────────────────
+
+const FS_MAX_NODES: usize = 64;
+const FS_NAME_LEN: usize  = 30;   // full path, e.g. b"/docs/a"
+const FS_DATA_LEN: usize  = 94;   // file contents (fits one 128B IPC payload)
+
+#[derive(Clone, Copy)]
+struct FsNode {
+    used: bool,
+    is_dir: bool,
+    name: [u8; FS_NAME_LEN],   // absolute path; 0-padded
+    name_len: usize,
+    data: [u8; FS_DATA_LEN],
+    data_len: usize,
+    mount: u8,
+}
+impl FsNode { const fn empty() -> Self { Self {
+    used: false, is_dir: false, name: [0; FS_NAME_LEN], name_len: 0,
+    data: [0; FS_DATA_LEN], data_len: 0, mount: 0,
+}}}
+
+struct FsStore { nodes: [FsNode; FS_MAX_NODES] }
+impl FsStore {
+    const fn new() -> Self { Self { nodes: [FsNode::empty(); FS_MAX_NODES] } }
+    fn find_node(&self, mount: u8, name: &[u8]) -> Option<usize> {
+        for (i, node) in self.nodes.iter().enumerate() {
+            if node.used && node.mount == mount && &node.name[..node.name_len] == name {
+                return Some(i);
+            }
+        }
+        None
+    }
+}
+static FS_STORE: crate::drivers::serial::Spinlock<FsStore> =
+    crate::drivers::serial::Spinlock::new(FsStore::new());
+
+fn fs_check_cap(sender: TaskId, mount: u8, need_write: bool) -> bool {
+    let sched = scheduler::SCHEDULER.lock();
+    if let Some(task) = sched.get_task(sender) {
+        for cap in task.cap_table.slots.iter().flatten() {
+            if let Resource::FsNode { mount: m, readable, writable } = cap.resource {
+                if m == mount {
+                    if need_write { if writable && cap.write { return true; } }
+                    else          { if readable && cap.read  { return true; } }
+                }
+            }
+        }
+    }
+    false
+}
+
+fn ensure_fs_service() {
+    let mut sched = scheduler::SCHEDULER.lock();
+    if sched.tasks[84].is_none() {
+        let mut caps = CapTable::new();
+        let _ = caps.insert(Capability {
+            resource: Resource::IpcChannel { target_task: TaskId(64) },
+            read: true, write: true, grant: false, sealed: false, id: 0, origin: None,
+        }).unwrap();
+        sched.tasks[84] = Some(Task::new(TaskId(84), fs_service_main, caps));
+        crate::process::TASKS_SPAWNED.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+extern "C" fn fs_service_main() -> ! {
+    loop {
+        match process::ipc::sys_receive_typed() {
+            Ok(msg) => {
+                let mut reply = [0u8; 128];
+                let mut reply_len = 1;
+                FS_OPS.fetch_add(1, Ordering::Relaxed);
+                
+                if msg.tag != process::IpcTag::FsOp {
+                    reply[0] = 4; // bad request
+                } else if msg.len < 3 {
+                    reply[0] = 4; // bad request
+                } else {
+                    let op = msg.payload[0];
+                    let mount = msg.payload[1];
+                    let name_len = msg.payload[2] as usize;
+                    
+                    if name_len > 30 || msg.len < 3 + name_len {
+                        reply[0] = 4; // bad request
+                    } else {
+                        let name_bytes = &msg.payload[3..3 + name_len];
+                        log_trace("fs_op", op as u64, 0);
+                        
+                        match op {
+                            0 => { // mkdir
+                                if !fs_check_cap(msg.sender, mount, true) {
+                                    reply[0] = 1; // denied
+                                } else {
+                                    let mut store = FS_STORE.lock();
+                                    if store.find_node(mount, name_bytes).is_some() {
+                                        reply[0] = 4; // already exists
+                                    } else {
+                                        let mut found_slot = None;
+                                        for (idx, node) in store.nodes.iter().enumerate() {
+                                            if !node.used {
+                                                found_slot = Some(idx);
+                                                break;
+                                            }
+                                        }
+                                        if let Some(idx) = found_slot {
+                                            let node = &mut store.nodes[idx];
+                                            node.used = true;
+                                            node.is_dir = true;
+                                            node.name[..name_len].copy_from_slice(name_bytes);
+                                            node.name_len = name_len;
+                                            node.data_len = 0;
+                                            node.mount = mount;
+                                            reply[0] = 0; // ok
+                                        } else {
+                                            reply[0] = 3; // full
+                                        }
+                                    }
+                                }
+                            }
+                            1 => { // write
+                                if !fs_check_cap(msg.sender, mount, true) {
+                                    reply[0] = 1; // denied
+                                } else {
+                                    let data_len = msg.payload[33] as usize;
+                                    if data_len > 94 || msg.len < 34 + data_len {
+                                        reply[0] = 4; // bad request
+                                    } else {
+                                        let data_bytes = &msg.payload[34..34 + data_len];
+                                        let mut store = FS_STORE.lock();
+                                        let slot_opt = store.find_node(mount, name_bytes);
+                                        if let Some(idx) = slot_opt {
+                                            let node = &mut store.nodes[idx];
+                                            if node.is_dir {
+                                                reply[0] = 4; // cannot write to dir
+                                            } else {
+                                                node.data[..data_len].copy_from_slice(data_bytes);
+                                                node.data_len = data_len;
+                                                reply[0] = 0; // ok
+                                            }
+                                        } else {
+                                            let mut found_slot = None;
+                                            for (idx, node) in store.nodes.iter().enumerate() {
+                                                if !node.used {
+                                                    found_slot = Some(idx);
+                                                    break;
+                                                }
+                                            }
+                                            if let Some(idx) = found_slot {
+                                                let node = &mut store.nodes[idx];
+                                                node.used = true;
+                                                node.is_dir = false;
+                                                node.name[..name_len].copy_from_slice(name_bytes);
+                                                node.name_len = name_len;
+                                                node.data[..data_len].copy_from_slice(data_bytes);
+                                                node.data_len = data_len;
+                                                node.mount = mount;
+                                                reply[0] = 0; // ok
+                                            } else {
+                                                reply[0] = 3; // full
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            2 => { // read
+                                if !fs_check_cap(msg.sender, mount, false) {
+                                    reply[0] = 1; // denied
+                                } else {
+                                    let store = FS_STORE.lock();
+                                    if let Some(idx) = store.find_node(mount, name_bytes) {
+                                        let node = &store.nodes[idx];
+                                        if node.is_dir {
+                                            reply[0] = 2; // not found / is dir
+                                        } else {
+                                            reply[0] = 0; // ok
+                                            reply[1] = node.data_len as u8;
+                                            reply[2..2 + node.data_len].copy_from_slice(&node.data[..node.data_len]);
+                                            reply_len = 2 + node.data_len;
+                                        }
+                                    } else {
+                                        reply[0] = 2; // not found
+                                    }
+                                }
+                            }
+                            3 => { // ls
+                                if !fs_check_cap(msg.sender, mount, false) {
+                                    reply[0] = 1; // denied
+                                } else {
+                                    let mut prefix = [0u8; 32];
+                                    let mut prefix_len;
+                                    if name_bytes == b"/" {
+                                        prefix[0] = b'/';
+                                        prefix_len = 1;
+                                    } else {
+                                        prefix[..name_len].copy_from_slice(name_bytes);
+                                        prefix_len = name_len;
+                                        if name_bytes[name_len - 1] != b'/' {
+                                            prefix[name_len] = b'/';
+                                            prefix_len += 1;
+                                        }
+                                    }
+                                    
+                                    let store = FS_STORE.lock();
+                                    let mut count = 0;
+                                    let mut out_idx = 2;
+                                    for node in store.nodes.iter() {
+                                        if node.used && node.mount == mount {
+                                            let node_name = &node.name[..node.name_len];
+                                            if node_name.starts_with(&prefix[..prefix_len]) && node_name != name_bytes {
+                                                let suffix = &node_name[prefix_len..];
+                                                if !suffix.contains(&b'/') {
+                                                    if out_idx + suffix.len() + 1 <= 128 {
+                                                        reply[out_idx..out_idx + suffix.len()].copy_from_slice(suffix);
+                                                        out_idx += suffix.len();
+                                                        reply[out_idx] = b'\n';
+                                                        out_idx += 1;
+                                                        count += 1;
+                                                    }
+                                                }
+                                            } else if name_bytes == b"/" && node_name.starts_with(b"/") && node_name != b"/" {
+                                                let suffix = &node_name[1..];
+                                                if !suffix.contains(&b'/') {
+                                                    if out_idx + suffix.len() + 1 <= 128 {
+                                                        reply[out_idx..out_idx + suffix.len()].copy_from_slice(suffix);
+                                                        out_idx += suffix.len();
+                                                        reply[out_idx] = b'\n';
+                                                        out_idx += 1;
+                                                        count += 1;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    reply[0] = 0;
+                                    reply[1] = count as u8;
+                                    reply_len = out_idx;
+                                }
+                            }
+                            4 => { // delete
+                                if !fs_check_cap(msg.sender, mount, true) {
+                                    reply[0] = 1; // denied
+                                } else {
+                                    let mut store = FS_STORE.lock();
+                                    if let Some(idx) = store.find_node(mount, name_bytes) {
+                                        store.nodes[idx].used = false;
+                                        reply[0] = 0;
+                                    } else {
+                                        reply[0] = 2; // not found
+                                    }
+                                }
+                            }
+                            5 => { // stat
+                                if !fs_check_cap(msg.sender, mount, false) {
+                                    reply[0] = 1; // denied
+                                } else {
+                                    let store = FS_STORE.lock();
+                                    if let Some(idx) = store.find_node(mount, name_bytes) {
+                                        let node = &store.nodes[idx];
+                                        reply[0] = 0;
+                                        reply[1] = if node.is_dir { 1 } else { 0 };
+                                        let size_val = node.data_len as u64;
+                                        reply[2..10].copy_from_slice(&size_val.to_ne_bytes());
+                                        reply[10] = node.mount;
+                                        reply_len = 11;
+                                    } else {
+                                        reply[0] = 2; // not found
+                                    }
+                                }
+                            }
+                            _ => { reply[0] = 4; }
+                        }
+                    }
+                }
+                
+                {
+                    let mut sched = scheduler::SCHEDULER.lock();
+                    let me = sched.get_task_mut(TaskId(84)).unwrap();
+                    me.cap_table.slots[1] = Some(Capability {
+                        resource: Resource::IpcChannel { target_task: msg.sender },
+                        read: true, write: true, grant: false, sealed: false,
+                        id: 84000 + msg.sender.0 as u64, origin: None,
+                    });
+                }
+                let _ = process::ipc::sys_send_typed(
+                    1, process::IpcTag::FsReply as u16, 1, &reply[..reply_len]);
+            }
+            Err(_) => scheduler::yield_cpu(),
+        }
+    }
+}
+
+// ── Device manager service ───────────────────────────────────────────────────
+
+fn dev_check_cap(sender: TaskId, id: u8, require_write: bool) -> bool {
+    let sched = scheduler::SCHEDULER.lock();
+    if let Some(task) = sched.get_task(sender) {
+        for cap in task.cap_table.slots.iter().flatten() {
+            if let Resource::Device { id: cap_id, readable, writable } = cap.resource {
+                if cap_id == id {
+                    if require_write { if writable && cap.write { return true; } }
+                    else          { if readable && cap.read  { return true; } }
+                }
+            }
+        }
+    }
+    false
+}
+
+fn ensure_device_service() {
+    let mut sched = scheduler::SCHEDULER.lock();
+    if sched.tasks[85].is_none() {
+        let mut caps = CapTable::new();
+        let _ = caps.insert(Capability {
+            resource: Resource::IpcChannel { target_task: TaskId(64) },
+            read: true, write: true, grant: false, sealed: false, id: 0, origin: None,
+        }).unwrap();
+        sched.tasks[85] = Some(Task::new(TaskId(85), dev_service_main, caps));
+        crate::process::TASKS_SPAWNED.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+extern "C" fn dev_service_main() -> ! {
+    loop {
+        match process::ipc::sys_receive_typed() {
+            Ok(msg) => {
+                let mut reply = [0u8; 128];
+                let mut reply_len = 1;
+                DEV_OPS.fetch_add(1, Ordering::Relaxed);
+                
+                if msg.tag != process::IpcTag::DevOp {
+                    reply[0] = 3;
+                } else if msg.len < 2 {
+                    reply[0] = 3;
+                } else {
+                    let op = msg.payload[0];
+                    let dev_id = msg.payload[1];
+                    log_trace("dev_op", op as u64, dev_id as u64);
+                    
+                    if dev_id != 0 && dev_id != 1 {
+                        reply[0] = 3;
+                    } else {
+                        match op {
+                            0 => { // read
+                                if !dev_check_cap(msg.sender, dev_id, false) {
+                                    reply[0] = 1; // denied
+                                } else {
+                                    if dev_id == 0 { // serial
+                                        let mut read_len = 0;
+                                        while read_len < 120 {
+                                            if let Some(b) = crate::drivers::serial::SERIAL1.lock().try_read() {
+                                                reply[2 + read_len] = b;
+                                                read_len += 1;
+                                            } else { break; }
+                                        }
+                                        if read_len > 0 {
+                                            reply[0] = 0;
+                                            reply[1] = read_len as u8;
+                                            reply_len = 2 + read_len;
+                                        } else {
+                                            reply[0] = 2; // empty
+                                        }
+                                    } else { // keyboard
+                                        let mut read_len = 0;
+                                        while read_len < 120 {
+                                            if let Some(b) = crate::drivers::keyboard::try_read() {
+                                                reply[2 + read_len] = b;
+                                                read_len += 1;
+                                            } else { break; }
+                                        }
+                                        if read_len > 0 {
+                                            reply[0] = 0;
+                                            reply[1] = read_len as u8;
+                                            reply_len = 2 + read_len;
+                                        } else {
+                                            reply[0] = 2; // empty
+                                        }
+                                    }
+                                }
+                            }
+                            1 => { // write
+                                if !dev_check_cap(msg.sender, dev_id, true) {
+                                    reply[0] = 1;
+                                } else {
+                                    let write_len = msg.payload[2] as usize;
+                                    if write_len > 120 || msg.len < 3 + write_len {
+                                        reply[0] = 3;
+                                    } else {
+                                        let write_bytes = &msg.payload[3..3 + write_len];
+                                        if dev_id == 0 {
+                                            use core::fmt::Write;
+                                            let _ = crate::drivers::serial::SERIAL1.lock().write_str(
+                                                core::str::from_utf8(write_bytes).unwrap_or("")
+                                            );
+                                            reply[0] = 0;
+                                        } else {
+                                            reply[0] = 3; // keyboard read-only
+                                        }
+                                    }
+                                }
+                            }
+                            _ => { reply[0] = 3; }
+                        }
+                    }
+                }
+                
+                {
+                    let mut sched = scheduler::SCHEDULER.lock();
+                    let me = sched.get_task_mut(TaskId(85)).unwrap();
+                    me.cap_table.slots[1] = Some(Capability {
+                        resource: Resource::IpcChannel { target_task: msg.sender },
+                        read: true, write: true, grant: false, sealed: false,
+                        id: 85000 + msg.sender.0 as u64, origin: None,
+                    });
+                }
+                let _ = process::ipc::sys_send_typed(
+                    1, process::IpcTag::DevReply as u16, 1, &reply[..reply_len]);
+            }
+            Err(_) => scheduler::yield_cpu(),
+        }
+    }
+}
+
+// ── Synchronization service ───────────────────────────────────────────────────
+
+const SYNC_MAX_OBJ: usize = 8;
+const SYNC_MAX_WAIT: usize = 16;
+
+#[derive(Clone, Copy)]
+struct SyncObject {
+    used: bool,
+    is_mutex: bool,
+    count: i32,
+    waiters: [usize; SYNC_MAX_WAIT],
+    wait_head: usize,
+    wait_tail: usize,
+    wait_len: usize,
+}
+impl SyncObject {
+    const fn new() -> Self { Self {
+        used: false, is_mutex: false, count: 0, waiters: [0; SYNC_MAX_WAIT],
+        wait_head: 0, wait_tail: 0, wait_len: 0,
+    }}
+    fn enqueue(&mut self, task_id: usize) -> Result<(), ()> {
+        if self.wait_len < SYNC_MAX_WAIT {
+            self.waiters[self.wait_tail] = task_id;
+            self.wait_tail = (self.wait_tail + 1) % SYNC_MAX_WAIT;
+            self.wait_len += 1;
+            Ok(())
+        } else { Err(()) }
+    }
+    fn dequeue(&mut self) -> Option<usize> {
+        if self.wait_len > 0 {
+            let task_id = self.waiters[self.wait_head];
+            self.wait_head = (self.wait_head + 1) % SYNC_MAX_WAIT;
+            self.wait_len -= 1;
+            Some(task_id)
+        } else { None }
+    }
+}
+
+struct SyncStore { objects: [SyncObject; SYNC_MAX_OBJ] }
+impl SyncStore { const fn new() -> Self { Self { objects: [SyncObject::new(); SYNC_MAX_OBJ] } } }
+static SYNC_STORE: crate::drivers::serial::Spinlock<SyncStore> =
+    crate::drivers::serial::Spinlock::new(SyncStore::new());
+
+fn sync_check_cap(sender: TaskId, id: u8) -> bool {
+    let sched = scheduler::SCHEDULER.lock();
+    if let Some(task) = sched.get_task(sender) {
+        for cap in task.cap_table.slots.iter().flatten() {
+            if let Resource::SyncObj { id: cap_id } = cap.resource {
+                if cap_id == id { return true; }
+            }
+        }
+    }
+    false
+}
+
+fn ensure_sync_service() {
+    let mut sched = scheduler::SCHEDULER.lock();
+    if sched.tasks[86].is_none() {
+        let mut caps = CapTable::new();
+        let _ = caps.insert(Capability {
+            resource: Resource::IpcChannel { target_task: TaskId(64) },
+            read: true, write: true, grant: false, sealed: false, id: 0, origin: None,
+        }).unwrap();
+        sched.tasks[86] = Some(Task::new(TaskId(86), sync_service_main, caps));
+        crate::process::TASKS_SPAWNED.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+extern "C" fn sync_service_main() -> ! {
+    loop {
+        match process::ipc::sys_receive_typed() {
+            Ok(msg) => {
+                let mut reply = [0u8; 128];
+                let reply_len = 1;
+                let mut should_reply = true;
+                
+                if msg.tag != process::IpcTag::SyncOp {
+                    reply[0] = 2;
+                } else if msg.len < 2 {
+                    reply[0] = 2;
+                } else {
+                    let op = msg.payload[0];
+                    let obj_id = msg.payload[1];
+                    log_trace("sync_op", op as u64, obj_id as u64);
+                    
+                    if obj_id >= 8 {
+                        reply[0] = 2;
+                    } else {
+                        match op {
+                            0 => { // create
+                                let is_mutex = msg.payload[2] != 0;
+                                let initial_count = msg.payload[3] as i32;
+                                let mut store = SYNC_STORE.lock();
+                                let obj = &mut store.objects[obj_id as usize];
+                                if obj.used {
+                                    reply[0] = 2;
+                                } else {
+                                    obj.used = true;
+                                    obj.is_mutex = is_mutex;
+                                    obj.count = initial_count;
+                                    obj.wait_head = 0;
+                                    obj.wait_tail = 0;
+                                    obj.wait_len = 0;
+                                    reply[0] = 0;
+                                }
+                            }
+                            1 => { // acquire
+                                if !sync_check_cap(msg.sender, obj_id) {
+                                    reply[0] = 1;
+                                } else {
+                                    let mut store = SYNC_STORE.lock();
+                                    let obj = &mut store.objects[obj_id as usize];
+                                    if !obj.used {
+                                        reply[0] = 2;
+                                    } else {
+                                        SYNC_ACQ.fetch_add(1, Ordering::Relaxed);
+                                        if obj.count > 0 {
+                                            obj.count -= 1;
+                                            reply[0] = 0;
+                                        } else {
+                                            if obj.enqueue(msg.sender.0).is_ok() {
+                                                should_reply = false;
+                                            } else {
+                                                reply[0] = 4;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            2 => { // release
+                                if !sync_check_cap(msg.sender, obj_id) {
+                                    reply[0] = 1;
+                                } else {
+                                    let mut store = SYNC_STORE.lock();
+                                    let obj = &mut store.objects[obj_id as usize];
+                                    if !obj.used {
+                                        reply[0] = 2;
+                                    } else {
+                                        SYNC_REL.fetch_add(1, Ordering::Relaxed);
+                                        if let Some(waiter_task_id) = obj.dequeue() {
+                                            let mut waiter_reply = [0u8; 128];
+                                            waiter_reply[0] = 0;
+                                            {
+                                                let mut sched = scheduler::SCHEDULER.lock();
+                                                let me = sched.get_task_mut(TaskId(86)).unwrap();
+                                                me.cap_table.slots[1] = Some(Capability {
+                                                    resource: Resource::IpcChannel { target_task: TaskId(waiter_task_id) },
+                                                    read: true, write: true, grant: false, sealed: false,
+                                                    id: 86000 + waiter_task_id as u64, origin: None
+                                                });
+                                            }
+                                            let res = process::ipc::sys_send_async(
+                                                1, process::IpcTag::SyncReply as u16, 1, &waiter_reply[..1]);
+                                            if let Err(e) = res {
+                                                crate::println!("Sync service waiter reply failed: {:?}", e);
+                                            }
+                                        } else {
+                                            if obj.is_mutex {
+                                                obj.count = 1;
+                                            } else {
+                                                obj.count += 1;
+                                            }
+                                        }
+                                        reply[0] = 0;
+                                    }
+                                }
+                            }
+                            _ => { reply[0] = 2; }
+                        }
+                    }
+                }
+                
+                if should_reply {
+                    {
+                        let mut sched = scheduler::SCHEDULER.lock();
+                        let me = sched.get_task_mut(TaskId(86)).unwrap();
+                        me.cap_table.slots[1] = Some(Capability {
+                            resource: Resource::IpcChannel { target_task: msg.sender },
+                            read: true, write: true, grant: false, sealed: false,
+                            id: 86000 + msg.sender.0 as u64, origin: None
+                        });
+                    }
+                    let res = process::ipc::sys_send_async(
+                        1, process::IpcTag::SyncReply as u16, 1, &reply[..reply_len]);
+                    if let Err(e) = res {
+                        crate::println!("Sync service sender reply failed: {:?}", e);
+                    }
+                }
+            }
+            Err(_) => {
+                scheduler::yield_cpu();
+            }
+        }
+    }
+}
+

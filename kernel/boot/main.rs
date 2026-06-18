@@ -1,9 +1,10 @@
 #![no_std]
 #![no_main]
 #![feature(abi_x86_interrupt)]
+#![allow(static_mut_refs)]
 
 use core::panic::PanicInfo;
-use limine::request::FramebufferRequest;
+use limine::request::{FramebufferRequest, MpRequest};
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 
 // Declare the module tree with explicit paths matching the repo design
@@ -29,6 +30,8 @@ pub mod drivers;
 pub mod userspace;
 #[path = "../shell/mod.rs"]
 pub mod shell;
+#[path = "../arch_sim/mod.rs"]
+pub mod arch_sim;
 
 pub const SHELL_MODE: bool = true;
 
@@ -47,6 +50,10 @@ pub static _START_MARKER: RequestsStartMarker = RequestsStartMarker::new();
 pub static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 
 #[used]
+#[unsafe(link_section = ".requests")]
+pub static MP_REQUEST: MpRequest = MpRequest::new(0);
+
+#[used]
 #[unsafe(link_section = ".requests_end_marker")]
 pub static _END_MARKER: RequestsEndMarker = RequestsEndMarker::new();
 
@@ -58,25 +65,24 @@ pub extern "C" fn _start() -> ! {
         core::ptr::read_volatile(&BASE_REVISION);
         core::ptr::read_volatile(&_START_MARKER);
         core::ptr::read_volatile(&FRAMEBUFFER_REQUEST);
+        core::ptr::read_volatile(&MP_REQUEST);
         core::ptr::read_volatile(&_END_MARKER);
         core::ptr::read_volatile(&memory::MEMMAP_REQUEST);
         core::ptr::read_volatile(&memory::HHDM_REQUEST);
     }
 
-    // Initialize serial console (must be first -- everything below may print).
+    // Initialize serial console (must be first: everything below may print).
     drivers::serial::SERIAL1.lock().init();
 
     println!("RunixOS kernel initialized.");
-    unsafe {
-        dbg_println!("[debug] GDT address: {:p}", &raw const arch::gdt::GDT);
-        dbg_println!("[debug] SCHEDULER address: {:p}", &raw const scheduler::SCHEDULER);
-        dbg_println!("[debug] TASK_STACKS address: {:p}", &raw const process::TASK_STACKS);
-        dbg_println!("[debug] size_of Scheduler: {}", core::mem::size_of::<scheduler::Scheduler>());
-        dbg_println!("[debug] size_of Task: {}", core::mem::size_of::<process::Task>());
-        dbg_println!("[debug] size_of CapTable: {}", core::mem::size_of::<process::CapTable>());
-        dbg_println!("[debug] size_of MessageQueue: {}", core::mem::size_of::<process::ipc::MessageQueue>());
-        dbg_println!("[debug] size_of Message: {}", core::mem::size_of::<process::ipc::Message>());
-    }
+    dbg_println!("[debug] GDT address: {:p}", &raw const arch::gdt::GDT);
+    dbg_println!("[debug] SCHEDULER address: {:p}", &raw const scheduler::SCHEDULER);
+    dbg_println!("[debug] TASK_STACKS address: {:p}", &raw const process::TASK_STACKS);
+    dbg_println!("[debug] size_of Scheduler: {}", core::mem::size_of::<scheduler::Scheduler>());
+    dbg_println!("[debug] size_of Task: {}", core::mem::size_of::<process::Task>());
+    dbg_println!("[debug] size_of CapTable: {}", core::mem::size_of::<process::CapTable>());
+    dbg_println!("[debug] size_of MessageQueue: {}", core::mem::size_of::<process::ipc::MessageQueue>());
+    dbg_println!("[debug] size_of Message: {}", core::mem::size_of::<process::ipc::Message>());
 
     // Verify bootloader handshake before using *any* bootloader response.
     if !BASE_REVISION.is_supported() {
@@ -101,6 +107,9 @@ pub extern "C" fn _start() -> ! {
     // Install IDT: CPU exceptions are caught; faulting tasks are terminated.
     interrupts::init_idt();
 
+    // Bring up secondary CPU cores (APs)
+    init_smp();
+
     if SHELL_MODE {
         interrupts::init_pic();
         interrupts::init_pit(100); // 100 Hz
@@ -112,7 +121,7 @@ pub extern "C" fn _start() -> ! {
         unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
         scheduler::yield_cpu();
     } else {
-        // ── Phase 6: Userspace Ecosystem ──────────────────────────────────────────
+        // ── Userspace Ecosystem ───────────────────────────────────────────────────
         //
         // Spawn user-space init task (Task 1) and pass it the root capability set.
         // The root capability set here is the Serial capability with grant rights.
@@ -135,28 +144,28 @@ pub extern "C" fn _start() -> ! {
             sched.tasks[1] = Some(init_task);
         }
 
-        // Phase 7: load the stress / failure / scale harness alongside init.
-        load_phase7_harness();
+        // Load the stress, failure, and scale harness alongside init.
+        load_harness_demo();
 
-        // Phase 8: load the capability security / audit demonstration task.
-        load_phase8_demo();
+        // Load the capability security and audit demonstration task.
+        load_security_demo();
 
-        // Phase 9: load the watchdog and the service it monitors/recovers.
-        load_phase9_watchdog();
+        // Load the watchdog and the service it monitors and recovers.
+        load_watchdog_demo();
 
-        // Phase 10: load the checkpoint/restore persistence demonstration.
-        load_phase10_persistence();
+        // Load the checkpoint and restore persistence demonstration.
+        load_persistence_demo();
 
-        // Phase 10 (Parts 4-8): load the distribution / migration demonstration.
-        load_phase10_dist();
+        // Load the distribution and migration demonstration.
+        load_distribution_demo();
 
-        // Phase 11: preemptive scheduling. Bring up the PIC/PIT timer and load the
-        // preemption + IPC-atomicity demonstration. The timer starts only *counting*
+        // Preemptive scheduling: bring up the PIC/PIT timer and load the
+        // preemption and IPC-atomicity demonstration. The timer starts only *counting*
         // ticks; the demo driver arms involuntary preemption for a controlled window
-        // so the earlier phases keep their deterministic cooperative behavior.
+        // so the earlier tasks keep their deterministic cooperative behavior.
         interrupts::init_pic();
         interrupts::init_pit(100); // 100 Hz
-        load_phase11_preempt();
+        load_preemption_demo();
 
         println!("Microkernel tasks loaded. Launching scheduler...");
 
@@ -175,11 +184,49 @@ fn halt_loop() -> ! {
     }
 }
 
-// ── Phase 7: stress, scale & failure harness ───────────────────────────────────
+pub fn init_smp() {
+    unsafe {
+        arch::apic::enable_lapic();
+    }
+
+    if let Some(mp_response) = MP_REQUEST.response() {
+        let cpus = mp_response.cpus();
+        println!("[SMP] Detected {} CPU(s).", cpus.len());
+
+        for cpu in cpus {
+            if cpu.lapic_id == unsafe { arch::apic::lapic_id() } {
+                println!("[SMP] CPU {} is BSP (LAPIC ID {}).", cpu.processor_id, cpu.lapic_id);
+                continue;
+            }
+
+            println!("[SMP] Booting CPU {} (LAPIC ID {})...", cpu.processor_id, cpu.lapic_id);
+            // Wake up this AP core. We pass its processor ID as the extra argument.
+            cpu.bootstrap(ap_entry, cpu.processor_id as u64);
+        }
+    } else {
+        println!("[SMP] Warning: No MP response from Limine.");
+    }
+}
+
+pub unsafe extern "C" fn ap_entry(info: &limine::mp::MpInfo) -> ! {
+    let cpu_id = info.processor_id as usize;
+    arch::gdt::init_cpu(cpu_id);
+    interrupts::init_idt();
+    arch::apic::enable_lapic();
+    // Enable interrupts on the AP so it can receive IPIs
+    core::arch::asm!("sti", options(nomem, nostack));
+
+    println!("[SMP] AP CPU {} successfully booted and waiting for IPIs.", cpu_id);
+    loop {
+        core::arch::asm!("hlt");
+    }
+}
+
+// ── Stress, scale and failure harness ─────────────────────────────────────────
 //
 // These are ring-0 *kernel* tasks (they call the kernel APIs directly rather
 // than trapping via `int 0x80`). They run alongside the user-space init/service
-// ecosystem to exercise the Phase 7 success criteria at runtime:
+// ecosystem to exercise the harness success criteria at runtime:
 //
 //   - fault containment   : `task_crasher` faults; the kernel terminates only it
 //   - failure semantics    : `task_probe` sends to an already-dead task and must
@@ -195,8 +242,8 @@ const HARNESS_PROBE:   usize = 102;
 const HARNESS_WORKER_BASE: usize = 103;
 const WORKER_COUNT: usize = 16;
 
-/// Loads the Phase 7 kernel harness tasks into the scheduler.
-fn load_phase7_harness() {
+/// Loads the kernel harness tasks into the scheduler.
+fn load_harness_demo() {
     use process::{Capability, CapTable, Resource, Task, TaskId};
 
     let mut sched = scheduler::SCHEDULER.lock();
@@ -230,7 +277,7 @@ fn load_phase7_harness() {
     }
 
     println!(
-        "[phase7] harness loaded: crasher + dead/probe + {} workers.",
+        "[harness] loaded: crasher + dead/probe + {} workers.",
         WORKER_COUNT
     );
 }
@@ -274,27 +321,27 @@ extern "C" fn task_probe() -> ! {
     scheduler::terminate_current_task();
 }
 
-/// Phase 8 slot for the security-demonstration kernel task.
+/// Slot for the security-demonstration kernel task.
 const HARNESS_SECURITY: usize = 119;
-
-/// Loads the Phase 8 security demo task. It runs after init has performed its
+ 
+/// Loads the security demo task. It runs after init has performed its
 /// grants, so the audit dump reflects the full ecosystem plus the demo's own
 /// grant/revoke chain.
-fn load_phase8_demo() {
+fn load_security_demo() {
     use process::{CapTable, Task, TaskId};
     let mut sched = scheduler::SCHEDULER.lock();
     sched.tasks[HARNESS_SECURITY] =
         Some(Task::new(TaskId(HARNESS_SECURITY), task_security_demo, CapTable::new()));
 }
-
-/// Phase 8: runs the capability revocation-propagation demo and audit dump,
+ 
+/// Runs the capability revocation-propagation demo and audit dump,
 /// then exits cleanly.
 extern "C" fn task_security_demo() -> ! {
     // Let init finish its spawn/grant orchestration first.
     for _ in 0..2 {
         scheduler::yield_cpu();
     }
-    syscall::phase8_security_demo();
+    syscall::security_demo();
     scheduler::terminate_current_task();
 }
 
@@ -310,13 +357,13 @@ extern "C" fn task_worker() -> ! {
     scheduler::terminate_current_task();
 }
 
-// ── Phase 9: stability, watchdog & service recovery ─────────────────────────────
+// ── Watchdog and service recovery ───────────────────────────────────────────────
 //
 // A kernel watchdog monitors a service task. When the service crashes (faults),
 // the IDT handler contains it and leaves it `Terminated`. The watchdog detects
 // that, restarts the service in the same slot with a freshly granted capability
 // set (capability redistribution on failure), and bounds restarts so a service
-// that cannot be recovered does not loop forever. This demonstrates the Phase 9
+// that cannot be recovered does not loop forever. This demonstrates the watchdog
 // criteria: services recover from failure, the kernel stays minimal and stable,
 // and boot/recovery is deterministic.
 
@@ -347,8 +394,8 @@ fn fragile_service_caps() -> process::CapTable {
     caps
 }
 
-/// Loads the Phase 9 watchdog and its monitored service.
-fn load_phase9_watchdog() {
+/// Loads the watchdog and its monitored service.
+fn load_watchdog_demo() {
     use process::{Task, TaskId};
     let mut sched = scheduler::SCHEDULER.lock();
     sched.tasks[HARNESS_SERVICE] = Some(Task::new(
@@ -390,7 +437,7 @@ extern "C" fn task_watchdog() -> ! {
 
         // Read the monitored service's liveness. We release the lock here and
         // re-acquire it below to restart; that gap is safe ONLY because the
-        // scheduler is cooperative -- no task runs between our `yield_cpu`
+        // scheduler is cooperative: no task runs between our `yield_cpu`
         // returns, so nothing can mutate the slot in between. This TOCTOU window
         // would need closing if preemption is ever added.
         let terminated = {
@@ -430,24 +477,24 @@ extern "C" fn task_watchdog() -> ! {
     }
 }
 
-// ── Phase 10: persistence (checkpoint / restore) ────────────────────────────────
+// ── Persistence (checkpoint and restore) ────────────────────────────────────────
 //
-// In-memory demonstration of Parts 1-3: checkpoint the whole system's
+// In-memory demonstration of checkpointing: checkpoint the whole system's
 // checkpointable state, simulate state loss, restore, and verify the capability
-// graph round-trips intact. Cross-reboot durability and distribution (Parts 4-8)
+// graph round-trips intact. Cross-reboot durability and distribution
 // are out of scope for this kernel build (see process/snapshot.rs).
-
+ 
 const HARNESS_PERSIST: usize = 125;
-
-/// Loads the Phase 10 persistence demonstration task.
-fn load_phase10_persistence() {
+ 
+/// Loads the persistence demonstration task.
+fn load_persistence_demo() {
     use process::{CapTable, Task, TaskId};
     let mut sched = scheduler::SCHEDULER.lock();
     sched.tasks[HARNESS_PERSIST] =
         Some(Task::new(TaskId(HARNESS_PERSIST), task_persistence_demo, CapTable::new()));
 }
 
-/// Phase 10: runs the checkpoint/restore demo against the logging service
+/// Runs the checkpoint and restore demo against the logging service
 /// (task 2), which holds a granted Serial capability by the time this runs.
 extern "C" fn task_persistence_demo() -> ! {
     // Let init finish spawning + granting before we snapshot.
@@ -458,19 +505,19 @@ extern "C" fn task_persistence_demo() -> ! {
     scheduler::terminate_current_task();
 }
 
-// ── Phase 10 (Parts 4-8): distribution substrate ────────────────────────────────
+// Distribution substrate
 //
 // Demonstrates network-transparent IPC, distributed capabilities, service
 // migration, and failover. Nodes are simulated logical domains within this
-// kernel image and the transport is in-kernel (see process/dist.rs); the routing
-// /migration machinery and programming-model invariance are what's exercised.
+// kernel image and the transport is in-kernel (see process/dist.rs), and the routing
+// and migration machinery and programming-model invariance are what is exercised.
 
 const DIST_DRIVER:  usize = 128; // runs the demo
 const DIST_BACKING: usize = 129; // local task backing the service before migration
 const DIST_REPLICA: usize = 130; // local task the service fails over onto
 
-/// Loads the Phase 10 distribution demo plus its two scratch service tasks.
-fn load_phase10_dist() {
+/// Loads the distribution demo plus its two scratch service tasks.
+fn load_distribution_demo() {
     use process::{CapTable, Task, TaskId};
     let mut sched = scheduler::SCHEDULER.lock();
     sched.tasks[DIST_DRIVER] =
@@ -482,7 +529,7 @@ fn load_phase10_dist() {
         Some(Task::new(TaskId(DIST_REPLICA), dist_scratch_entry, CapTable::new()));
 }
 
-/// Capabilities the demo service "owns" -- carried across migration to prove
+/// Capabilities the demo service "owns", carried across migration to prove
 /// state preservation (Part 7).
 fn dist_service_caps() -> process::CapTable {
     let mut caps = process::CapTable::new();
@@ -502,7 +549,7 @@ extern "C" fn dist_scratch_entry() -> ! {
 }
 
 extern "C" fn task_dist_demo() -> ! {
-    // Run after the other phase demos have settled.
+    // Run after the other demonstrations have settled.
     for _ in 0..6 {
         scheduler::yield_cpu();
     }
@@ -510,31 +557,31 @@ extern "C" fn task_dist_demo() -> ! {
     scheduler::terminate_current_task();
 }
 
-// ── Phase 11: preemptive scheduling + IPC validate→use atomicity ────────────────
+// Preemptive scheduling and IPC validate-and-use atomicity
 //
-// Two demonstrations, run by a single driver task after the cooperative phases
-// (7-10) have completed so their deterministic behavior is preserved:
+// Two demonstrations, run by a single driver task after the cooperative
+// demonstrations have completed so their deterministic behavior is preserved:
 //
-//   A. Time-slicing proof. Two kernel tasks that *never* yield are made to run.
-//      Under the cooperative scheduler only the first could ever execute; under
-//      the timer both make progress, proving involuntary preemption is real.
+//   A. Time-slicing proof. Two kernel tasks that never yield are made to run.
+//      Under the cooperative scheduler only the first could ever execute, but
+//      under the timer both make progress, proving involuntary preemption is real.
 //
 //   B. The research finding. The IPC send path validates a capability and then,
-//      in a separate step, uses it (sys_send_typed: resolve_target @ipc.rs:183,
-//      then delivery @ipc.rs:199). Cooperative scheduling made that gap atomic
+//      in a separate step, uses it (sys_send_typed: resolve_target at ipc.rs,
+//      then delivery at ipc.rs). Cooperative scheduling made that gap atomic
 //      for free. Here we open that exact window under preemption and let a
 //      modelled concurrent revoker run inside it (the deterministic adversary in
-//      `preempt`): the capability is valid at validation and GONE at use -- a
-//      send on revoked authority. Then we wrap the same window in a
+//      preempt): the capability is valid at validation and gone at use, which is
+//      a send on revoked authority. Then we wrap the same window in a
 //      non-preemptible region and show the revoker is deferred and the operation
 //      becomes atomic again.
 
 use core::sync::atomic::AtomicBool;
 
-// NOTE on slot choice: slots 120-122 are reused transiently by the Phase 8
-// security demo (syscall::phase8_security_demo) as scratch holders A/B/C, which
-// it then *nulls*. Phase 11 uses free slots in the 90s so its long-lived tasks
-// are never clobbered by another phase.
+// NOTE on slot choice: slots 120-122 are reused transiently by the security demo
+// (syscall::security_demo) as scratch holders A/B/C, which it then nulls.
+// The preemption demo uses free slots in the 90s so its long-lived tasks
+// are never clobbered by another demonstration.
 const PREEMPT_DRIVER: usize = 90;
 const PREEMPT_BUSY_A: usize = 91;
 const PREEMPT_BUSY_B: usize = 92;
@@ -548,7 +595,7 @@ static BUSY_B_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// How many timer ticks each busy task runs for before exiting.
 const BUSY_TICK_BUDGET: u64 = 12;
 
-fn load_phase11_preempt() {
+fn load_preemption_demo() {
     use process::{CapTable, Task, TaskId};
     let mut sched = scheduler::SCHEDULER.lock();
     sched.tasks[PREEMPT_DRIVER] =
@@ -571,7 +618,7 @@ extern "C" fn task_park() -> ! {
 }
 
 /// A compute task that never voluntarily yields. It runs until the global tick
-/// count advances by `BUSY_TICK_BUDGET` -- progress it can only make if the timer
+/// count advances by `BUSY_TICK_BUDGET`, progress it can only make if the timer
 /// is slicing it in and out. Increments a counter so the driver can prove it ran.
 extern "C" fn task_busy_a() -> ! {
     while !GO_BUSY.load(Ordering::SeqCst) {
@@ -579,7 +626,7 @@ extern "C" fn task_busy_a() -> ! {
     }
     // We may have been resumed from an interrupts-disabled context (e.g. a user
     // task's syscall yield) while parked above. The measured loop never yields,
-    // so it relies entirely on the timer to make progress -- explicitly enable
+    // so it relies entirely on the timer to make progress, explicitly enable
     // interrupts so a tick can actually preempt us.
     unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
     let start = preempt::stats().ticks;
@@ -618,12 +665,12 @@ fn task_is_terminated(slot: usize) -> bool {
 }
 
 extern "C" fn task_preempt_demo() -> ! {
-    // 1. Let the cooperative phases (7-10) finish before arming preemption.
+    // 1. Let the cooperative demonstrations finish before arming preemption.
     for _ in 0..40 {
         scheduler::yield_cpu();
     }
 
-    println!("[preempt] Phase 11: preemptive scheduling.");
+    println!("[preempt] preemptive scheduling.");
     let pre = preempt::stats();
     println!(
         "[preempt] timer mechanism live: {} ticks counted while unarmed (ISR runs, no switching).",
@@ -663,7 +710,7 @@ extern "C" fn task_preempt_demo() -> ! {
         );
     }
 
-    // ── B. IPC validate→use atomicity ────────────────────────────────────────
+    // ── B. IPC validate-and-use atomicity ────────────────────────────────────────
     ipc_toctou_experiment();
 
     preempt::set_armed(false);
@@ -676,7 +723,7 @@ extern "C" fn task_preempt_demo() -> ! {
 }
 
 /// Installs the capability under test into the victim's table and returns its
-/// (slot, id). It is an IpcChannel authorizing a send to the server task -- the
+/// (slot, id). It is an IpcChannel authorizing a send to the server task, the
 /// exact resource kind `resolve_target` validates in the real send path.
 fn install_victim_cap() -> (usize, u64) {
     use process::{Capability, Resource, TaskId};
@@ -725,7 +772,7 @@ fn ipc_toctou_experiment() {
     unsafe { core::arch::asm!("sti", options(nomem, nostack)); }
     println!("[preempt] IPC validate->use atomicity (models sys_send_typed: resolve_target @ipc.rs:183 then use @ipc.rs:199):");
 
-    // ── Vulnerable: the validate→use window is preemptible ───────────────────
+    // ── Vulnerable: the validate-and-use window is preemptible ───────────────────
     let (slot, _id) = install_victim_cap();
     preempt::arm_adversary(PREEMPT_VICTIM, slot);
     preempt::reset_window_ticks();
@@ -733,7 +780,7 @@ fn ipc_toctou_experiment() {
     // VALIDATE: authority is checked here (capability present).
     let validated = victim_cap_id(slot);
 
-    // Open the exact gap between validation and use, then let a tick land -- a
+    // Open the exact gap between validation and use, then let a tick land, a
     // tick we permit to act, modelling a concurrent revoker task being scheduled.
     preempt::enter_ipc_window();
     let wt_vuln = spin_until_window_tick();
@@ -764,7 +811,7 @@ fn ipc_toctou_experiment() {
     preempt::arm_adversary(PREEMPT_VICTIM, slot2);
     preempt::reset_window_ticks();
 
-    preempt::enter_critical(); // make validate→use a non-preemptible region
+    preempt::enter_critical(); // make validate-and-use a non-preemptible region
     let validated2 = victim_cap_id(slot2);
     preempt::enter_ipc_window();
     let wt_guard = spin_until_window_tick(); // ticks still LAND...

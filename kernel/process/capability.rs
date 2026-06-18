@@ -1,13 +1,13 @@
-// RunixOS capability system -- Phase 3: sealing, rights attenuation, grant
+// RunixOS capability system: sealing, rights attenuation, and grant
 //
-// Phase 3 additions over Phase 2:
-//   - `sealed` flag: a sealed capability cannot be removed by the holder;
+// Capability features:
+//   * `sealed` flag: a sealed capability cannot be removed by the holder;
 //     only the kernel (at task-creation time, or via a future revocation API)
-//     can clear it.  Prevents a task from discarding a mandatory obligation.
-//   - Rights attenuation on grant: `Capability::attenuate` returns a derived
+//     can clear it. Prevents a task from discarding a mandatory obligation.
+//   * Rights attenuation on grant: `Capability::attenuate` returns a derived
 //     capability whose rights are the *intersection* of the donor's rights and
-//     the requested rights.  You cannot grant more authority than you hold.
-//   - `CapTable::grant_to` copies an attenuated capability into another task's
+//     the requested rights. You cannot grant more authority than you hold.
+//   * `CapTable::grant_to` copies an attenuated capability into another task's
 //     table in one atomic step, enforcing the grant-right check.
 use crate::process::TaskId;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -32,9 +32,9 @@ pub enum Resource {
     IpcChannel { target_task: TaskId },
     /// Permission to access a virtual memory mapping.
     MemoryMapping { start_vaddr: usize, size: usize, writeable: bool },
-    /// Phase 10: a *location-independent* reference to a service by id. Unlike
+    /// A *location-independent* reference to a service by id. Unlike
     /// `IpcChannel`, which names a concrete local task, this names a service that
-    /// the distribution layer may resolve to a local task or a remote node -- and
+    /// the distribution layer may resolve to a local task or a remote node, and
     /// that resolution can change (migration) without invalidating the holder's
     /// capability. This is what makes a capability "identify a service rather
     /// than a physical machine location".
@@ -43,16 +43,22 @@ pub enum Resource {
     KVEntry { slot: usize, readable: bool, writable: bool },
     /// Scoped channel to publish or read a specific event kind.
     LogChannel { kind: u8, readable: bool, writable: bool },
+    /// Authority over a filesystem subtree rooted at `mount`.
+    FsNode { mount: u8, readable: bool, writable: bool },
+    /// Authority to talk to a hardware device.
+    Device { id: u8, readable: bool, writable: bool },
+    /// Authority over one synchronization object.
+    SyncObj { id: u8 },
 }
 
 /// A capability represents a bundle of access rights to a resource.
 ///
-/// Phase 3 adds two new fields:
+/// Fields for access control and delegation:
 /// - `grant`: the holder may delegate this capability (with equal or lesser
 ///   rights) to another task via `SYS_CAP_GRANT`.
 /// - `sealed`: the kernel (or the granting entity) may lock the slot so the
-///   holder cannot `remove` it.  Sealing is one-way: once set, only a kernel-
-///   level revocation (future Phase 4) can clear it.
+///   holder cannot `remove` it. Sealing is one-way: once set, only a kernel-
+///   level revocation (future expansion) can clear it.
 #[derive(Debug, Clone, Copy)]
 pub struct Capability {
     pub resource: Resource,
@@ -67,7 +73,7 @@ pub struct Capability {
     /// Globally-unique identity, stamped by `CapTable::insert` from
     /// [`next_cap_id`]. `0` means "not yet installed in a slot".
     pub id: u64,
-    /// Derivation lineage (Phase 8): if this capability was produced by granting
+    /// Derivation lineage: if this capability was produced by granting
     /// from another capability, `origin` is that donor capability's `id`.
     /// Root capabilities the kernel mints directly have `origin = None`.
     /// Revocation propagation follows these ids; because ids are never recycled,
@@ -92,7 +98,7 @@ impl Capability {
             // The grantee never inherits the grant right unless explicitly
             // requested *and* the donor has it (already checked above).
             grant:  self.grant && requested.grant,
-            // Sealed-ness is never inherited through grant -- the recipient
+            // Sealed-ness is never inherited through grant: the recipient
             // gets an unsealed copy; the kernel seals at task-creation time.
             sealed: false,
             // Identity is assigned when the cap is installed into a slot.
@@ -112,7 +118,7 @@ pub struct RightsMask {
     pub grant: bool,
 }
 
-pub const MAX_CAPS: usize = 16;
+pub const MAX_CAPS: usize = 32;
 
 /// Fixed-size capability table for a task, avoiding dynamic allocation.
 #[derive(Clone, Copy)]
@@ -162,8 +168,8 @@ impl CapTable {
 
     /// Revokes/removes a capability by index.
     ///
-    /// Returns `Err(())` if the slot is **sealed** -- sealed capabilities can
-    /// only be revoked by the kernel through its own revocation path (Phase 4).
+    /// Returns `Err(())` if the slot is **sealed**: sealed capabilities can
+    /// only be revoked by the kernel through its own revocation path.
     pub fn remove(&mut self, idx: usize) -> Result<Option<Capability>, ()> {
         if idx >= MAX_CAPS {
             return Ok(None);
@@ -179,7 +185,7 @@ impl CapTable {
     }
 
     /// Kernel-level forced revocation: removes regardless of sealed flag.
-    /// Only the kernel calls this (from fault handlers / Phase 4 revocation).
+    /// Only the kernel calls this (from fault handlers / forced revocation).
     pub fn kernel_revoke(&mut self, idx: usize) -> Option<Capability> {
         if idx < MAX_CAPS {
             if let Some(ref cap) = self.slots[idx] {

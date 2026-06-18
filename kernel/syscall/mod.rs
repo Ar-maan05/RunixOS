@@ -1,13 +1,13 @@
-// RunixOS syscall surface -- Phase 3: structured dispatch + capability grant
+// RunixOS syscall surface: structured dispatch and capability grant
 //
 // RunixOS has no traditional syscall model. The `int 0x80` trap is purely the
-// ring-3 -> ring-0 transport. Every request is validated against the caller's
+// ring-3 to ring-0 transport. Every request is validated against the caller's
 // capabilities.
 //
-// Phase 3 adds:
-//   - `SYS_CAP_GRANT`   (5): delegate an attenuated capability to another task
-//   - `SYS_SEND_TYPED`  (6): IPC send with tag + version validated by kernel
-//   - The dispatcher now uses a proper match on a `KernelRequest` enum built
+// Syscall entry points:
+//   * `SYS_CAP_GRANT`   (5): delegate an attenuated capability to another task
+//   * `SYS_SEND_TYPED`  (6): IPC send with tag and version validated by kernel
+//   * The dispatcher uses a match on a `KernelRequest` enum built
 //     from the raw register frame, rather than ad-hoc if/else chains.
 
 use crate::process::capability::{Capability, Resource, RightsMask};
@@ -16,15 +16,15 @@ use crate::scheduler::SCHEDULER;
 // ── Syscall numbers (passed in rax) ─────────────────────────────────────────
 pub const SYS_DEBUG:      u64 = 0; // liveness ping
 pub const SYS_YIELD:      u64 = 1; // cooperative yield
-pub const SYS_SEND:       u64 = 2; // legacy IPC send (Phase 1/2 compat)
+pub const SYS_SEND:       u64 = 2; // legacy IPC send (compatibility mode)
 pub const SYS_RECEIVE:    u64 = 3; // IPC receive
 pub const SYS_SERIAL_WRITE: u64 = 4; // capability-gated serial write
-pub const SYS_CAP_GRANT:  u64 = 5; // Phase 3: delegate attenuated capability
-pub const SYS_SEND_TYPED: u64 = 6; // Phase 3: structured IPC send
-pub const SYS_CAP_REVOKE: u64 = 7; // Phase 4: revoke capability from target task
-pub const SYS_SEND_ASYNC: u64 = 8; // Phase 5: async IPC send
-pub const SYS_RECEIVE_ASYNC: u64 = 9; // Phase 5: async IPC receive
-pub const SYS_SPAWN_TASK: u64 = 10; // Phase 6: spawn user task
+pub const SYS_CAP_GRANT:  u64 = 5; // delegate attenuated capability
+pub const SYS_SEND_TYPED: u64 = 6; // structured IPC send
+pub const SYS_CAP_REVOKE: u64 = 7; // revoke capability from target task
+pub const SYS_SEND_ASYNC: u64 = 8; // async IPC send
+pub const SYS_RECEIVE_ASYNC: u64 = 9; // async IPC receive
+pub const SYS_SPAWN_TASK: u64 = 10; // spawn user task
 
 // ── Register frame ──────────────────────────────────────────────────────────
 
@@ -107,7 +107,7 @@ enum KernelRequest<'a> {
     Send { cap_idx: usize, payload: &'a [u8] },
     Receive { buf: *mut u8, cap: usize },
     SerialWrite { cap_idx: usize, bytes: &'a [u8] },
-    /// Phase 3: grant an attenuated cap to a target task.
+    /// Grant an attenuated cap to a target task.
     CapGrant {
         /// Slot in the caller's table to grant from.
         src_cap_idx: usize,
@@ -116,31 +116,31 @@ enum KernelRequest<'a> {
         /// Requested rights for the derived capability.
         rights: RightsMask,
     },
-    /// Phase 3: structured send with tag + version.
+    /// Structured send with tag + version.
     SendTyped {
         cap_idx: usize,
         tag: u16,
         version: u16,
         payload: &'a [u8],
     },
-    /// Phase 4: revoke capability from target task.
+    /// Revoke capability from target task.
     CapRevoke {
         target_task: usize,
         cap_idx: usize,
     },
-    /// Phase 5: async IPC send
+    /// Async IPC send
     SendAsync {
         cap_idx: usize,
         tag: u16,
         version: u16,
         payload: &'a [u8],
     },
-    /// Phase 5: async IPC receive
+    /// Async IPC receive
     ReceiveAsync {
         buf: *mut u8,
         cap: usize,
     },
-    /// Phase 6: spawn user task
+    /// Spawn user task
     SpawnTask {
         blob_type: usize,
     },
@@ -318,12 +318,12 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
             }
         }
 
-        // ── Phase 3: capability grant ─────────────────────────────────────
+        // ── Capability grant ──────────────────────────────────────────────
         KernelRequest::CapGrant { src_cap_idx, target_task, rights } => {
             frame.rax = dispatch_cap_grant(task_id, src_cap_idx, target_task, rights);
         }
 
-        // ── Phase 3: structured send ──────────────────────────────────────
+        // ── Structured send ───────────────────────────────────────────────
         KernelRequest::SendTyped { cap_idx, tag, version, payload } => {
             frame.rax = match crate::process::ipc::sys_send_typed(cap_idx, tag, version, payload) {
                 Ok(())     => 0,
@@ -335,7 +335,7 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
             };
         }
 
-        // ── Phase 5: async send & receive ─────────────────────────────────
+        // ── Async send & receive ──────────────────────────────────────────
         KernelRequest::SendAsync { cap_idx, tag, version, payload } => {
             frame.rax = match crate::process::ipc::sys_send_async(cap_idx, tag, version, payload) {
                 Ok(()) => 0,
@@ -370,7 +370,7 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
             }
         }
 
-        // ── Phase 6: spawn user task ──────────────────────────────────────
+        // ── Spawn user task ───────────────────────────────────────────────
         KernelRequest::SpawnTask { blob_type } => {
             if task_id == 1 {
                 frame.rax = dispatch_spawn_task(blob_type);
@@ -379,7 +379,7 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
             }
         }
 
-        // ── Phase 4: capability revocation ────────────────────────────────
+        // ── Capability revocation ─────────────────────────────────────────
         KernelRequest::CapRevoke { target_task, cap_idx } => {
             frame.rax = dispatch_cap_revoke(task_id, target_task, cap_idx);
         }
@@ -394,7 +394,7 @@ pub extern "C" fn syscall_dispatch(frame: &mut SyscallFrame) {
         unsafe { *(frame as *const SyscallFrame as *const u64).add(16) });
 }
 
-// ── Phase 3: capability grant implementation ─────────────────────────────────
+// ── Capability grant implementation ─────────────────────────────────────────
 
 /// Executes the SYS_CAP_GRANT request for the running task.
 ///
@@ -435,7 +435,7 @@ fn dispatch_cap_grant(
         };
         match cap.attenuate(rights) {
             Ok(mut derived) => {
-                // Phase 8: stamp derivation lineage (the donor capability's
+                // Stamp derivation lineage (the donor capability's
                 // unique id) so a later revocation of the donor propagates here.
                 derived.origin = Some(cap.id);
                 derived
@@ -481,7 +481,7 @@ fn dispatch_cap_grant(
     }
 }
 
-// ── Phase 4: capability revocation implementation ────────────────────────────
+// ── Capability revocation implementation ─────────────────────────────────────
 
 /// Executes the SYS_CAP_REVOKE request for the running task.
 ///
@@ -529,7 +529,7 @@ fn dispatch_cap_revoke(
                 cap.resource,
                 cap_idx,
             );
-            // Phase 8: revocation propagation -- revoke every capability derived
+            // Revocation propagation: revoke every capability derived
             // (transitively) from the one just removed.
             propagate_revocation(&mut sched, cap.id);
             0
@@ -609,16 +609,16 @@ fn propagate_revocation(sched: &mut crate::scheduler::Scheduler, root_id: u64) {
     }
 }
 
-// ── Phase 8: security demonstration ──────────────────────────────────────────
+// ── Security and capability maturity demonstration ──────────────────────────
 
-/// Self-contained demonstration of capability maturity (Phase 8): builds a
+/// Self-contained demonstration of capability maturity: builds a
 /// three-level derivation chain across scratch tasks, revokes the root, and
 /// verifies the revocation propagates transitively to every derived capability.
 /// Finishes by dumping the kernel audit trail.
 ///
 /// Uses dedicated high scratch slots so it never perturbs the live ecosystem,
 /// and removes them afterwards. Runs entirely under one scheduler lock.
-pub fn phase8_security_demo() {
+pub fn security_demo() {
     use crate::process::{Capability, CapTable, Resource, Task, TaskId};
     use crate::process::audit::{record, AuditKind, KERNEL_ACTOR};
 
@@ -626,7 +626,7 @@ pub fn phase8_security_demo() {
     const B: usize = 121; // first-level grantee
     const C: usize = 122; // second-level grantee (derived from B)
 
-    crate::println!("[phase8] capability revocation-propagation demo:");
+    crate::println!("[security-demo] capability revocation-propagation demo:");
 
     {
         let mut sched = SCHEDULER.lock();
@@ -646,7 +646,7 @@ pub fn phase8_security_demo() {
         sched.tasks[B] = Some(Task::new(TaskId(B), scratch_entry, CapTable::new()));
         sched.tasks[C] = Some(Task::new(TaskId(C), scratch_entry, CapTable::new()));
 
-        // Grant A.slot0 -> B (derived, origin = A's cap id).
+        // Grant A.slot0 to B (derived, origin = A's cap id).
         let from_a = sched.get_task(TaskId(A)).unwrap().cap_table.get(0).copied().unwrap();
         let mut to_b = from_a;
         to_b.sealed = false;
@@ -656,14 +656,14 @@ pub fn phase8_security_demo() {
         let b_id = sched.get_task(TaskId(B)).unwrap().cap_table.get(b_slot).unwrap().id;
         record(AuditKind::Grant, TaskId(A), TaskId(B), to_b.resource, b_slot);
 
-        // Grant B.slot -> C (derived, origin = B's cap id).
+        // Grant B.slot to C (derived, origin = B's cap id).
         let mut to_c = to_b;
         to_c.origin = Some(b_id);
         let c_slot = sched.get_task_mut(TaskId(C)).unwrap().cap_table.insert(to_c).unwrap();
         record(AuditKind::Grant, TaskId(B), TaskId(C), to_c.resource, c_slot);
 
         crate::println!(
-            "  built chain: A(slot0) -> B(slot{}) -> C(slot{}).",
+            "  built chain: A(slot0) to B(slot{}) to C(slot{}).",
             b_slot, c_slot
         );
 
@@ -787,7 +787,7 @@ pub fn sys_cap_revoke(target_task: usize, cap_idx: usize) -> Result<(), ()> {
     }
 }
 
-// ── Phase 6: Spawn Task Implementation ───────────────────────────────────────
+// ── Spawn Task Implementation ────────────────────────────────────────────────
 
 /// Handles the SYS_SPAWN_TASK syscall.
 /// Only Task 1 (init) is allowed to call this.

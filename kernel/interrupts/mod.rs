@@ -1,8 +1,8 @@
 // RunixOS interrupt & CPU-exception management.
 //
-// Phase 1 fault isolation: we install an IDT with handlers for the CPU
+// Fault containment: we install an IDT with handlers for the CPU
 // exception vectors. Recoverable faults raised by a task (page fault, general
-// protection fault, invalid opcode, divide error) terminate *that task* and
+// protection fault, invalid opcode, divide error) terminate that task and
 // reschedule, so a buggy task cannot bring down the kernel. Unrecoverable
 // conditions (double fault) halt the machine with diagnostics.
 
@@ -204,7 +204,7 @@ extern "C" {
     pub fn page_fault_entry();
 }
 
-// ── Phase 11: timer interrupt (preemptive scheduling) ───────────────────────
+// ── Timer interrupt (preemptive scheduling) ──────────────────────────────────
 //
 // The timer ISR must save the *full* general-purpose register file, not just
 // the callee-saved set the cooperative switch handles. A timer fires at an
@@ -215,7 +215,7 @@ extern "C" {
 // `timer_isr` decides to preempt) reuses the *cooperative* `switch_context`: it
 // saves this stack's rsp into the task and loads the next task's. Because both
 // voluntary yields and timer preemptions leave a `switch_context` frame on top
-// of a suspended task's stack, the two paths unify -- a preempted task is
+// of a suspended task's stack, the two paths unify: a preempted task is
 // resumed exactly like one that yielded, and on its way back out this stub
 // restores the full register file and `iretq`s to the interrupted instruction.
 
@@ -256,8 +256,84 @@ core::arch::global_asm!(
     "    iretq",
 );
 
+core::arch::global_asm!(
+    ".global keyboard_interrupt_entry",
+    "keyboard_interrupt_entry:",
+    "    push rax",
+    "    push rcx",
+    "    push rdx",
+    "    push rsi",
+    "    push rdi",
+    "    push r8",
+    "    push r9",
+    "    push r10",
+    "    push r11",
+    "    push rbx",
+    "    push rbp",
+    "    push r12",
+    "    push r13",
+    "    push r14",
+    "    push r15",
+    "    call keyboard_isr",
+    "    pop r15",
+    "    pop r14",
+    "    pop r13",
+    "    pop r12",
+    "    pop rbp",
+    "    pop rbx",
+    "    pop r11",
+    "    pop r10",
+    "    pop r9",
+    "    pop r8",
+    "    pop rdi",
+    "    pop rsi",
+    "    pop rdx",
+    "    pop rcx",
+    "    pop rax",
+    "    iretq",
+);
+
+core::arch::global_asm!(
+    ".global ipi_interrupt_entry",
+    "ipi_interrupt_entry:",
+    "    push rax",
+    "    push rcx",
+    "    push rdx",
+    "    push rsi",
+    "    push rdi",
+    "    push r8",
+    "    push r9",
+    "    push r10",
+    "    push r11",
+    "    push rbx",
+    "    push rbp",
+    "    push r12",
+    "    push r13",
+    "    push r14",
+    "    push r15",
+    "    call ipi_isr",
+    "    pop r15",
+    "    pop r14",
+    "    pop r13",
+    "    pop r12",
+    "    pop rbp",
+    "    pop rbx",
+    "    pop r11",
+    "    pop r10",
+    "    pop r9",
+    "    pop r8",
+    "    pop rdi",
+    "    pop rsi",
+    "    pop rdx",
+    "    pop rcx",
+    "    pop rax",
+    "    iretq",
+);
+
 extern "C" {
     fn timer_interrupt_entry();
+    pub fn keyboard_interrupt_entry();
+    fn ipi_interrupt_entry();
 }
 
 const PIC1_CMD: u16 = 0x20;
@@ -290,8 +366,8 @@ pub fn init_pic() {
         // ICW4: 8086 mode.
         outb(PIC1_DATA, 0x01);
         outb(PIC2_DATA, 0x01);
-        // Masks: unmask only IRQ0 on the master; mask everything else.
-        outb(PIC1_DATA, 0xFE);
+        // Masks: unmask IRQ0 and IRQ1 on the master; mask everything else.
+        outb(PIC1_DATA, 0xFC);
         outb(PIC2_DATA, 0xFF);
     }
 }
@@ -331,6 +407,17 @@ pub extern "C" fn timer_isr() {
     }
 }
 
+/// The Rust half of the IPI interrupt, called by `ipi_interrupt_entry`.
+#[no_mangle]
+pub extern "C" fn ipi_isr() {
+    unsafe {
+        // Ack the LAPIC interrupt by writing 0 to the EOI register (offset 0xB0)
+        let lapic = crate::arch::apic::lapic_base();
+        lapic.write(0xB0, 0);
+    }
+    crate::arch::apic::handle_ipi();
+}
+
 /// Installs the IDT and points the CPU at it.
 pub fn init_idt() {
     let cs = current_cs();
@@ -341,8 +428,14 @@ pub fn init_idt() {
     set_handler(13, general_protection_entry as *const () as u64, cs);
     set_handler(14, page_fault_entry as *const () as u64, cs);
 
-    // Phase 11: timer interrupt (IRQ0 -> vector 0x20) for preemptive scheduling.
+    // Timer interrupt (IRQ0: vector 0x20) for preemptive scheduling.
     set_handler(TIMER_VECTOR, timer_interrupt_entry as *const () as u64, cs);
+
+    // Keyboard interrupt (IRQ1: vector 0x21)
+    set_handler(0x21, keyboard_interrupt_entry as *const () as u64, cs);
+
+    // IPI interrupt (vector 0x40)
+    set_handler(0x40, ipi_interrupt_entry as *const () as u64, cs);
 
     // Syscall trap: reachable from ring 3 (DPL=3).
     set_handler_dpl(0x80, crate::syscall::syscall_entry as *const () as u64, cs, 3);

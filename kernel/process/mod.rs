@@ -1,4 +1,4 @@
-// RunixOS task and process subsystem -- Phase 3
+// RunixOS task subsystem
 pub mod capability;
 pub mod ipc;
 pub mod audit;
@@ -60,12 +60,12 @@ pub const STACK_SIZE: usize = 32768; // 32 KiB stack
 /// linker places the static. The x86_64 SysV ABI requires 16-byte stack
 /// alignment, and stack pushes must be 8-aligned; an unaligned stack base is
 /// undefined behavior (and trips debug's misaligned-pointer check). Aligning the
-/// element type pins every stack -- and every derived `rsp` -- to a 16-byte
+/// element type pins every stack, and every derived `rsp`, to a 16-byte
 /// boundary regardless of the static's placement.
 #[repr(C, align(16))]
 pub struct TaskStack(pub [u8; STACK_SIZE]);
 
-// Statically allocate task stacks to avoid heap requirements in Phase 1
+// Statically allocate task stacks to avoid heap requirements.
 #[no_mangle]
 pub static mut TASK_STACKS: [TaskStack; MAX_TASKS] =
     [const { TaskStack([0; STACK_SIZE]) }; MAX_TASKS];
@@ -115,10 +115,10 @@ extern "C" {
 // `switch_context` reaches it via `ret` with `r15` preloaded to the task's real
 // entry point (see `Task::new`). It enables interrupts before entering the body.
 //
-// Why this matters under Phase 11: a fresh task can be scheduled for the first
+// Resuming fresh tasks under preemption: a fresh task can be scheduled for the first
 // time *from the timer ISR* (an involuntary preemption picks it). The ISR runs
 // with IF=0, and the cooperative `switch_context` is a plain `ret` that does not
-// touch RFLAGS -- so without this `sti` the task would run with interrupts
+// touch RFLAGS; so without this `sti` the task would run with interrupts
 // disabled, no further timer tick could ever fire, and the system would wedge.
 // (Tasks resumed *after* being preempted restore IF via the ISR's `iretq`; only
 // first-run tasks need this.) Ring-3 tasks use `iret_to_user` instead and manage
@@ -159,7 +159,7 @@ impl Task {
         rsp -= 8;
         unsafe { *(rsp as *mut usize) = 0x202; }
 
-        // Saved callee regs, pushed high→low so the *first* popped (r15) is lowest:
+        // Saved callee regs, pushed high to low so the *first* popped (r15) is lowest:
         // rbp, rbx, r12, r13, r14, then r15 = entry.
         for _ in 0..5 {
             rsp -= 8;
@@ -210,7 +210,7 @@ impl Task {
         };
         push(USER_DATA as usize); // ss
         push(user_stack_top); // rsp
-        push(0x002); // rflags: reserved bit set, IF cleared (cooperative)
+        push(0x202); // rflags: reserved bit set, IF set (preemptive)
         push(USER_CODE as usize); // cs
         push(entry_vaddr); // rip
 

@@ -1,4 +1,4 @@
-// RunixOS preemption subsystem -- Phase 11: preemptive scheduling.
+// RunixOS preemption subsystem: preemptive scheduling.
 //
 // This module holds the *policy* state that turns the timer interrupt into a
 // scheduler tick, plus the synchronization primitives the capability/IPC layer
@@ -9,7 +9,7 @@
 // between the two steps. Preemption withdraws that guarantee. The state below
 // lets us (a) measure how often a timer tick lands *inside* a critical section
 // that the cooperative design assumed was indivisible, and (b) close that window
-// with an explicit non-preemptible region -- and prove, on a booting VM, the
+// with an explicit non-preemptible region, and prove, on a booting VM, the
 // difference between the two.
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, AtomicBool, Ordering};
@@ -30,22 +30,22 @@ static DEFERRED: AtomicU64 = AtomicU64::new(0);
 /// section non-preemptible" knob.
 static PREEMPT_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-/// Master switch: until preemption is armed, the timer only counts (Stage 1
+/// Master switch: until preemption is armed, the timer only counts (initial
 /// mechanism bring-up and the windows before/after a demo).
 static ARMED: AtomicBool = AtomicBool::new(false);
 
-// ── Research instrumentation: the validate→use window in IPC ─────────────────
+// ── Research instrumentation: the validate-and-use window in IPC ──────────────
 //
 // `IN_IPC_WINDOW` is raised by the IPC send path between the moment it has
 // *resolved* a capability to a target and the moment it *uses* that target to
 // deliver. `WINDOW_TICKS` counts timer ticks that landed in exactly that
-// window -- the empirical width of the TOCTOU the cooperative scheduler hid.
+// window: the empirical width of the TOCTOU the cooperative scheduler hid.
 static IN_IPC_WINDOW: AtomicBool = AtomicBool::new(false);
 static WINDOW_TICKS: AtomicU64 = AtomicU64::new(0);
-
+ 
 /// A deterministic adversary: when armed, the *next* timer tick that catches a
-/// task inside the IPC validate→use window will execute a pending capability
-/// revocation right there -- winning the race on purpose so the hazard is
+/// task inside the IPC validate-and-use window will execute a pending capability
+/// revocation right there, winning the race on purpose so the hazard is
 /// reproducible instead of statistical. Set to the (task, slot) to revoke.
 static PENDING_REVOKE: AtomicUsize = AtomicUsize::new(NO_REVOKE);
 static PENDING_REVOKE_TASK: AtomicUsize = AtomicUsize::new(0);
@@ -80,11 +80,11 @@ pub fn in_critical() -> bool {
     PREEMPT_COUNT.load(Ordering::SeqCst) != 0
 }
 
-/// RAII scope guard for a capability validate→use region. Entering raises the
-/// non-preemptible count *and* marks the IPC validate→use window (telemetry the
+/// RAII scope guard for a capability validate-and-use region. Entering raises the
+/// non-preemptible count *and* marks the IPC validate-and-use window (telemetry the
 /// timer uses to measure, and the demo adversary uses to target, in-flight
-/// capability operations). Dropping clears both -- on every control-flow path,
-/// including early `return`s -- which is why the real send path uses this rather
+/// capability operations). Dropping clears both on every control-flow path,
+/// including early `return`s, which is why the real send path uses this rather
 /// than hand-balanced enter/exit calls.
 pub struct CriticalWindow {
     _private: (),
@@ -113,16 +113,16 @@ impl Drop for CriticalWindow {
 pub fn on_tick_should_switch() -> bool {
     TICKS.fetch_add(1, Ordering::Relaxed);
 
-    // Research probe: measure how often a tick lands inside the IPC validate→use
-    // window. This is pure observation -- the hardware interrupt fires regardless
+    // Research probe: measure how often a tick lands inside the IPC validate-and-use
+    // window. This is pure observation: the hardware interrupt fires regardless
     // of whether we are in a non-preemptible region, so this count rises even
     // when guarded. What changes under guarding is whether the tick is *allowed
-    // to act* (switch / let a revoker run), handled below.
+    // to act* (switch or let a revoker run), handled below.
     let in_window = IN_IPC_WINDOW.load(Ordering::SeqCst);
     if in_window {
         WINDOW_TICKS.fetch_add(1, Ordering::Relaxed);
     }
-
+ 
     if !ARMED.load(Ordering::SeqCst) {
         return false;
     }
@@ -133,9 +133,9 @@ pub fn on_tick_should_switch() -> bool {
         DEFERRED.fetch_add(1, Ordering::Relaxed);
         return false;
     }
-
-    // Preemption is permitted on this tick. Only here -- where a concurrent
-    // revoker task could really be scheduled in -- does the modelled adversary
+ 
+    // Preemption is permitted on this tick. Only here, where a concurrent
+    // revoker task could really be scheduled in, does the modelled adversary
     // get to act mid-window.
     if in_window {
         maybe_fire_adversary();
@@ -156,7 +156,7 @@ pub fn note_deferred_locked() {
 
 // ── IPC window API (used by process::ipc) ────────────────────────────────────
 
-/// Marks the start of the capability validate→use window. Anything that runs
+/// Marks the start of the capability validate-and-use window. Anything that runs
 /// (a timer tick, a deterministic adversary) between this and [`exit_ipc_window`]
 /// is observing a non-atomic capability operation.
 #[inline]

@@ -43,7 +43,7 @@ impl<T> Spinlock<T> {
     /// Non-blocking acquire. Returns `None` if the lock is already held.
     ///
     /// Required by the preemption layer: a timer ISR must never *spin* on the
-    /// scheduler lock -- if the interrupted code holds it, spinning would
+    /// scheduler lock: if the interrupted code holds it, spinning would
     /// deadlock the single core. The ISR uses this to detect that case and
     /// defer the preemption instead.
     pub fn try_lock(&self) -> Option<SpinlockGuard<'_, T>> {
@@ -109,17 +109,6 @@ impl SerialPort {
             outb(self.port + 3, 0x03); // 8 bits, no parity, one stop bit
             outb(self.port + 2, 0xC7); // Enable FIFO, clear, 14-byte threshold
             outb(self.port + 4, 0x0B); // RTS/DSR set
-        }
-    }
-
-    /// Checks if the transmit buffer is empty (bit 5 of Line Status Register).
-    fn is_transmit_empty(&self) -> bool {
-        unsafe {
-            // SAFETY:
-            // - Why necessary: Reading from the serial port status register (inb).
-            // - Invariants: Valid port mapping.
-            // - Soundness: Safe register read.
-            (inb(self.port + 5) & 0x20) != 0
         }
     }
 
@@ -226,7 +215,7 @@ pub static REDIRECT_TARGET: Spinlock<Option<(usize, usize, usize)>> = Spinlock::
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use fmt::Write;
-    // Phase 11: prints run in a non-preemptible region. A timer tick that
+    // Serial writes run in a non-preemptible region. A timer tick that
     // switched tasks while this core held the serial lock would leave another
     // task spinning on it; raising the preempt count makes the tick defer until
     // the lock is released, keeping serial output a clean critical section.
@@ -278,7 +267,7 @@ pub fn _print(args: fmt::Arguments) {
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => {
-        $crate::drivers::serial::_print(format_args!($($arg)*));
+        $crate::drivers::serial::_print(format_args!($($arg)*))
     };
 }
 
@@ -292,7 +281,7 @@ macro_rules! println {
 /// Compile-time verbosity switch for low-level kernel tracing.
 ///
 /// When `false`, `dbg_println!` expands to nothing, keeping the boot log
-/// deterministic and readable (Phase 9: deterministic boot). Flip to `true`
+/// deterministic and readable (deterministic boot). Flip to `true`
 /// to recover the verbose per-syscall / per-spawn diagnostics used during
 /// bring-up.
 pub const DEBUG: bool = false;

@@ -1,25 +1,24 @@
-// RunixOS system checkpoint/restore -- Phase 10 (Parts 1-3): persistence
+// RunixOS system checkpoint and restore: persistence.
 //
 // Scope of this module (honest boundaries):
-//   - Part 1 (persistent system state): serialize the *checkpointable* state of
-//     every task -- capability table, pending IPC (rendezvous buffer + async
-//     queue), task metadata (id, state) -- plus the scheduler's current task,
+//   * persistent system state: serialize the *checkpointable* state of
+//     every task (capability table, pending IPC rendezvous buffer, async
+//     queue, task metadata like id and state) plus the scheduler's current task
 //     into a single fixed-size snapshot, and restore it.
-//   - Part 2 (process checkpointing): the per-task projection above is exactly a
+//   * process checkpointing: the per-task projection above is exactly a
 //     process checkpoint of its capability/IPC/metadata state.
-//   - Part 3 (persistent capabilities): capabilities are POD (`Copy`) and carry
+//   * persistent capabilities: capabilities are plain old data and carry
 //     their globally-unique `id` and `origin` lineage, so the whole capability
-//     *graph* round-trips byte-for-byte; an integrity checksum over the graph
-//     stands in for the spec's "optional signing".
+//     graph round-trips byte-for-byte; an integrity checksum over the graph
+//     stands in for the optional signing.
 //
-// Deliberately OUT of scope here (need infrastructure the kernel lacks):
-//   - live register/stack capture-and-*resume* (live execution migration),
-//   - cross-*reboot* durability (needs a block-write driver),
-//   - all networking / distribution (Parts 4-8).
+// Deliberately OUT of scope here (due to lack of kernel infrastructure):
+//   * live register/stack capture-and-resume (live execution migration),
+//   * cross-reboot durability (needs a block-write driver),
+//   * networking and distribution.
 // So restore intentionally preserves each live task's execution context
-// (`rsp`/`cr3`/`kstack_top`) and only rolls back the serialized metadata -- the
-// "functionally equivalent" state the spec asks for, without corrupting running
-// stacks.
+// (`rsp`/`cr3`/`kstack_top`) and only rolls back the serialized metadata (the
+// functionally equivalent state) without corrupting running stacks.
 
 use crate::process::{MAX_TASKS, TaskId, TaskState};
 use crate::process::capability::{CapTable, Resource, MAX_CAPS};
@@ -77,6 +76,15 @@ fn resource_code(r: &Resource) -> u64 {
         Resource::LogChannel { kind, readable, writable } => {
             0x5000 ^ (*kind as u64) ^ ((*readable as u64) << 8) ^ ((*writable as u64) << 9)
         }
+        Resource::FsNode { mount, readable, writable } => {
+            0x6000 ^ (*mount as u64) ^ ((*readable as u64) << 8) ^ ((*writable as u64) << 9)
+        }
+        Resource::Device { id, readable, writable } => {
+            0x7000 ^ (*id as u64) ^ ((*readable as u64) << 8) ^ ((*writable as u64) << 9)
+        }
+        Resource::SyncObj { id } => {
+            0x8000 ^ (*id as u64)
+        }
     }
 }
 
@@ -84,7 +92,7 @@ fn resource_code(r: &Resource) -> u64 {
 /// Field-by-field (not raw bytes) so struct padding never feeds the hash.
 fn checksum(snap: &SystemSnapshot) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut mix = |v: u64, h: &mut u64| {
+    let mix = |v: u64, h: &mut u64| {
         *h ^= v;
         *h = h.wrapping_mul(0x0000_0100_0000_01b3);
     };
@@ -195,19 +203,19 @@ pub fn info() -> Option<u64> {
     if snap.valid { Some(snap.checksum) } else { None }
 }
 
-/// Phase 10 demonstration: checkpoint the system, simulate state loss by
+/// Persistence demonstration: checkpoint the system, simulate state loss by
 /// clearing a victim task's capability table, restore, and verify the victim's
-/// capability graph (ids + lineage included) came back intact -- then confirm a
+/// capability graph (ids + lineage included) came back intact, then confirm a
 /// re-capture reproduces the original checksum (deterministic persistence).
 ///
 /// `victim` should be a task known to hold capabilities at demo time.
 pub fn demo(victim: TaskId) {
-    crate::println!("[phase10] persistence demo: checkpoint / restore / verify.");
+    crate::println!("[persistence] demo: checkpoint, restore, and verify.");
 
     capture();
     let original = info().unwrap_or(0);
     crate::println!(
-        "[phase10] system state checkpointed (checksum={:#018x}).",
+        "[persistence] system state checkpointed (checksum={:#018x}).",
         original
     );
 
@@ -223,15 +231,15 @@ pub fn demo(victim: TaskId) {
     }
     let after_wipe = victim_fingerprint(victim);
     crate::println!(
-        "[phase10] simulated state loss: task {} cap count {} -> {}.",
+        "[persistence] simulated state loss: task {} cap count {} -> {}.",
         victim.0, before.0, after_wipe.0
     );
 
     // Restore from the checkpoint.
     match restore() {
-        Ok(n) => { crate::println!("[phase10] restored {} task checkpoint(s).", n); }
+        Ok(n) => { crate::println!("[persistence] restored {} task checkpoint(s).", n); }
         Err(()) => {
-            crate::println!("[phase10] FAIL: restore rejected (no/invalid snapshot).");
+            crate::println!("[persistence] FAIL: restore rejected (no/invalid snapshot).");
             return;
         }
     }
@@ -246,13 +254,13 @@ pub fn demo(victim: TaskId) {
 
     if equivalent && deterministic {
         crate::println!(
-            "[phase10] PASS: task {} capability graph restored ({} caps, id+lineage intact); \
+            "[persistence] PASS: task {} capability graph restored ({} caps, id+lineage intact); \
              checksum reproduced.",
             victim.0, after_restore.0
         );
     } else {
         crate::println!(
-            "[phase10] FAIL: equivalent={} (caps {}->{}), deterministic={} ({:#x} vs {:#x}).",
+            "[persistence] FAIL: equivalent={} (caps {}->{}), deterministic={} ({:#x} vs {:#x}).",
             equivalent, before.0, after_restore.0, deterministic, original, recomputed
         );
     }

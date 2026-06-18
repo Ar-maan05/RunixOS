@@ -1,18 +1,18 @@
-// RunixOS Rendezvous IPC System -- Phase 3: structured messages
+// RunixOS Rendezvous IPC System: structured messages
 //
-// Phase 3 changes over Phase 2:
-//   - `Message` gains a `tag` (IpcTag enum) and `version` field, turning the
-//     raw byte blob into a typed envelope.  The kernel can inspect the tag
+// Rendezvous IPC structure:
+//   * `Message` gains a `tag` (IpcTag enum) and `version` field, turning the
+//     raw byte blob into a typed envelope. The kernel can inspect the tag
 //     to validate/route messages without understanding the payload.
-//   - `sys_send_typed` is the new ring-3 entry point.  It accepts a user-
+//   * `sys_send_typed` is the new ring-3 task entry point. It accepts a user-
 //     supplied tag and version; the kernel enforces that the tag is valid
-//     (known enum variant) before forwarding.  Unknown tags are rejected
+//     (known enum variant) before forwarding. Unknown tags are rejected
 //     with `Err(IpcError::InvalidTag)`.
-//   - `IpcError` replaces the stringly-typed `()` error so callers can
+//   * `IpcError` replaces the stringly-typed `()` error so callers can
 //     distinguish "no capability" from "bad tag" from "target gone".
-//   - The old `sys_send`/`sys_receive` remain for kernel-internal use (Task 1,
-//     the kernel sender task) to avoid breaking Phase 2 paths while the ring-3
-//     userspace blob is updated in a follow-up.
+//   * The old `sys_send`/`sys_receive` remain for kernel-internal use (Task 1,
+//     the kernel sender task) to avoid breaking compatibility while the ring-3
+//     task userspace blob is updated in a follow-up.
 use crate::process::{TaskId, TaskState};
 use crate::process::capability::Resource;
 use crate::scheduler::SCHEDULER;
@@ -24,17 +24,17 @@ pub static IPC_DELIVERIES: core::sync::atomic::AtomicU64 = core::sync::atomic::A
 /// A discriminant that identifies the semantic type of an IPC message.
 ///
 /// The kernel validates that the tag is a known variant before forwarding
-/// (open-world enum variants are reserved for future phases).  This means a
+/// (open-world enum variants are reserved for future extensions).  This means a
 /// receiver can trust the tag was not forged by a buggy sender: the kernel
 /// would have rejected it.
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpcTag {
-    /// Untyped raw bytes -- backward-compat with Phase 2 paths.
+    /// Untyped raw bytes: backward-compatibility.
     Raw     = 0,
     /// A UTF-8 log line destined for the logging service.
     Log     = 1,
-    /// A key=value sensor reading (Phase 3 demo).
+    /// A key=value sensor reading.
     Sensor  = 2,
     /// An explicit "no operation" heartbeat ping.
     Ping    = 3,
@@ -48,6 +48,12 @@ pub enum IpcTag {
     LogRead    = 7,
     /// Event Log Acknowledgment.
     LogAck     = 8,
+    FsOp       = 9,
+    FsReply    = 10,
+    DevOp      = 11,
+    DevReply   = 12,
+    SyncOp     = 13,
+    SyncReply  = 14,
 }
 
 impl IpcTag {
@@ -64,6 +70,12 @@ impl IpcTag {
             6 => Some(IpcTag::LogPublish),
             7 => Some(IpcTag::LogRead),
             8 => Some(IpcTag::LogAck),
+            9 => Some(IpcTag::FsOp),
+            10 => Some(IpcTag::FsReply),
+            11 => Some(IpcTag::DevOp),
+            12 => Some(IpcTag::DevReply),
+            13 => Some(IpcTag::SyncOp),
+            14 => Some(IpcTag::SyncReply),
             _ => None,
         }
     }
@@ -167,7 +179,7 @@ impl MessageQueue {
 /// a caller-held lock is what lets the send path keep validation and use in one
 /// indivisible critical section (see `sys_send_typed`): the old design validated
 /// under its own short-lived lock and then re-locked to deliver, leaving a gap in
-/// which the capability could be revoked -- the Phase 11 TOCTOU.
+/// which the capability could be revoked, leading to a TOCTOU race hazard.
 fn resolve_target_locked(
     sched: &crate::scheduler::Scheduler,
     current: TaskId,
@@ -181,16 +193,8 @@ fn resolve_target_locked(
     }
 }
 
-/// Resolves the IpcChannel target from the current task's capability table,
-/// acquiring the scheduler lock itself. Used by paths that only need a one-shot
-/// resolution (not the atomic validate→use of the blocking send).
-fn resolve_target(cap_idx: usize) -> Result<TaskId, IpcError> {
-    let sched = SCHEDULER.lock();
-    let id = sched.current_task_id.ok_or(IpcError::NoContext)?;
-    resolve_target_locked(&sched, id, cap_idx)
-}
 
-/// Outcome of one validate→use attempt inside the send loop.
+/// Outcome of one validate-and-use attempt inside the send loop.
 enum SendStep {
     /// Message deposited and receiver marked runnable.
     Delivered,
@@ -200,7 +204,7 @@ enum SendStep {
     Blocked,
 }
 
-// ── Phase 3 & 5 public API ───────────────────────────────────────────────────
+// ── Structured message passing API ───────────────────────────────────────────
 
 /// Sends a **structured** message to the task named by an IpcChannel
 /// capability.  The kernel validates `tag` and `version` before forwarding.
@@ -232,16 +236,15 @@ pub fn sys_send_typed(
     let len = payload.len();
 
     loop {
-        // ── Non-preemptible capability validate→use region (Phase 11) ─────────
+        // ── Non-preemptible capability validate-and-use region ─────────────────
         //
         // The send capability is (re)validated and *used* inside one indivisible
         // region, so the authority that delivers the message is exactly the
-        // authority we just checked -- never a snapshot taken before a blocking
+        // authority we just checked: never a snapshot taken before a blocking
         // wait, and never one another task revoked in the gap between check and
-        // use. This closes the TOCTOU the Phase 11 VULNERABLE/GUARDED experiment
-        // reproduces, now in the real path every ring-3 sender travels.
+        // use. This closes the TOCTOU that preemption introduces, now in the real path every ring-3 sender travels.
         //
-        // The "use-point" -- where the region must extend to -- is deliberately
+        // The "use-point" (where the region must extend to) is deliberately
         // AFTER both halves of delivery: the message is deposited in the
         // receiver's `ipc_buffer` AND the receiver is marked `Ready`. The
         // guarantee is therefore "a delivered message implies the capability was
@@ -256,7 +259,7 @@ pub fn sys_send_typed(
         // blocked* is caught before the next delivery attempt.
         let outcome = {
             // The guard raises the non-preemptible count (and marks the window)
-            // and releases both when this scope ends -- covering the early-return
+            // and releases both when this scope ends: covering the early-return
             // validation-failure path too. The blocking wait below is outside it.
             let _region = crate::preempt::CriticalWindow::enter();
             let mut sched = SCHEDULER.lock();
@@ -303,7 +306,7 @@ pub fn sys_send_typed(
                     }
                 }
             }
-            // `_region` (and the scheduler lock) drop here: end of validate→use.
+            // `_region` (and the scheduler lock) drop here: end of validate-and-use.
         };
 
         match outcome {
@@ -425,7 +428,7 @@ pub fn sys_send_async(
         len: payload.len(),
     };
 
-    // Same non-preemptible validate→use region as `sys_send_typed`, minus the
+    // Same non-preemptible validate-and-use region as `sys_send_typed`, minus the
     // blocking wait (async send never parks). Validating and enqueuing under one
     // held lock + preempt guard means the capability that authorizes the enqueue
     // is the one we just checked.
@@ -507,15 +510,15 @@ pub fn sys_receive_async() -> Result<Message, IpcError> {
     Err(IpcError::NoMessage)
 }
 
-// ── Phase 1/2 compatibility shims ───────────────────────────────────────────
+// ── Compatibility shims ─────────────────────────────────────────────────────
 // Kept so the kernel-task paths (task_sender in boot/main.rs) and the legacy
 // receive path in the logger blob still compile without modification.
-/// Legacy untyped send (Phase 1/2 compatibility).  Wraps as `IpcTag::Raw`.
+/// Legacy untyped send (compatibility mode). Wraps as `IpcTag::Raw`.
 pub fn sys_send(cap_idx: usize, payload: &[u8]) -> Result<(), ()> {
     sys_send_typed(cap_idx, IpcTag::Raw as u16, 0, payload).map_err(|_| ())
 }
 
-/// Legacy untyped receive (Phase 1/2 compatibility).
+/// Legacy untyped receive (compatibility mode).
 pub fn sys_receive() -> Result<Message, ()> {
     sys_receive_typed().map_err(|_| ())
 }

@@ -137,13 +137,13 @@ pub fn terminate_current_task() -> ! {
     }
 }
 
-/// Involuntary reschedule, driven by the timer ISR (Phase 11).
+/// Involuntary reschedule, driven by the timer ISR.
 ///
 /// Mirrors the *selection* half of [`yield_cpu`], but with two differences that
 /// make it safe to run from interrupt context on a single core:
 ///
 ///   1. It acquires the scheduler lock with `try_lock`. If the interrupted task
-///      was already holding it (mid-IPC, mid-spawn, …), we must not spin -- that
+///      was already holding it (mid-IPC, mid-spawn, …), we must not spin: that
 ///      would deadlock the core. We defer the preemption to a later tick.
 ///   2. The current task is left `Ready` (it was `Running` and is merely being
 ///      time-sliced out), never blocked.
@@ -151,10 +151,10 @@ pub fn terminate_current_task() -> ! {
 /// The switch itself reuses the cooperative `switch_context`, so the preempted
 /// task's resume frame is identical to a voluntarily-yielded one.
 pub fn preempt_reschedule() {
-    let mut old_rsp_ptr: *mut usize = core::ptr::null_mut();
-    let mut new_rsp_val: usize = 0;
-    let mut new_kstack_top: usize = 0;
-    let mut new_cr3: usize = 0;
+    let old_rsp_ptr: *mut usize;
+    let new_rsp_val: usize;
+    let new_kstack_top: usize;
+    let new_cr3: usize;
 
     {
         let mut sched = match SCHEDULER.try_lock() {
@@ -298,7 +298,7 @@ pub fn yield_cpu() {
 
                 // Use static dummy area to write the initial boot context's stack pointer
                 static mut BOOT_RSP: usize = 0;
-                old_rsp_ptr = unsafe { &raw mut BOOT_RSP as *mut usize };
+                old_rsp_ptr = &raw mut BOOT_RSP as *mut usize;
             }
         }
     }
