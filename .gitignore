@@ -12,3 +12,13 @@ serial.log
 *.sock
 esp.img
 /pmem.img
+
+# interactive session artifacts
+input_session.txt
+out_session.txt
+
+# internal build sheets / specs
+CONSOLE_SPEC.md
+DOC_OVERHAUL_SPEC.md
+IMPLEMENTATION_SPEC.md
+PAPER_SPEC.md
